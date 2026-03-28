@@ -319,4 +319,4 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 
-bot.run("MTQ4NzI5MjI2OTI5ODk3NDc1MA.GU3n9z.SD7pwcbP9pATQKtDgxQfPOPXWnzNu4iuJX85kY")
+bot.run("TOKEN")
