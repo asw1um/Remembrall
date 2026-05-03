@@ -36,13 +36,11 @@ def init_db():
         conn.close()
 
 def query_db(query, args=(), one=False):
-    # Added isolation_level=None for better performance in WAL mode
     conn = sqlite3.connect(DB_FILE, timeout=20, isolation_level=None) 
     c = conn.cursor()
     try:
         if not query.strip().upper().startswith("SELECT"):
-            c.execute("BEGIN IMMEDIATE") # Forces a write lock immediately to prevent mid-operation deadlocks
-            c.execute(query, args)
+            c.execute("BEGIN IMMEDIATE") # Forces write lock immediately to prevent deadlock
             c.execute("COMMIT")
             rv = []
         else:
@@ -56,14 +54,158 @@ def query_db(query, args=(), one=False):
         conn.close()
     return (rv[0] if rv else None) if one else rv
 
-async def event_autocomplete(interaction: discord.Interaction, current: str):
-    query = "SELECT DISTINCT name FROM events WHERE name LIKE ? LIMIT 25"
-    rows = query_db(query, (f'%{current}%',))
+
+# async def event_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+#     guild_id = str(interaction.guild.id)
+#     user_id = str(interaction.user.id)
     
-    return [
-        app_commands.Choice(name=row[0], value=row[0]) 
-        for row in rows
-    ]
+#     # Logic: Only show personal events for 'event delete', show all for 'admin delete'
+#     if interaction.command.name == "delete" and interaction.command.parent.name == "event":
+#         query = "SELECT rowid, name, time FROM events WHERE guild_id = ? AND user_id = ? AND name LIKE ? LIMIT 25"
+#         params = (guild_id, user_id, f'%{current}%')
+#     else:
+#         # Admin view or other commands
+#         query = "SELECT rowid, name, time FROM events WHERE guild_id = ? AND name LIKE ? LIMIT 25"
+#         params = (guild_id, f'%{current}%')
+    
+#     rows = query_db(query, params)
+    
+#     choices = []
+#     for row in rows:
+#         rid, name_val, time_val = row[0], row[1], row[2]
+#         display_label = f"{name_val} ({time_val})"
+#         if len(display_label) > 100:
+#             display_label = display_label[:97] + "..."
+            
+#         # We pass the rowid as the value so the command knows exactly which row to target
+#         choices.append(app_commands.Choice(name=display_label, value=str(rid)))
+    
+#     return choices
+
+# async def event_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+#     guild_id = str(interaction.guild.id)
+#     user_id = str(interaction.user.id)
+    
+#     # Check if the command is inside the 'admin' group
+#     is_admin_view = interaction.command.parent and interaction.command.parent.name == "admin"
+    
+#     # 1. Build the Query based on who is looking
+#     if is_admin_view:
+#         # Admins see everything active in the server
+#         query = "SELECT rowid, name, time FROM events WHERE guild_id = ? AND lateness IS NULL AND name LIKE ? LIMIT 25"
+#         params = (guild_id, f'%{current}%')
+#     else:
+#         # Regular users ONLY see their own active events
+#         query = "SELECT rowid, name, time FROM events WHERE guild_id = ? AND user_id = ? AND lateness IS NULL AND name LIKE ? LIMIT 25"
+#         params = (guild_id, user_id, f'%{current}%')
+    
+#     rows = query_db(query, params)
+    
+#     choices = []
+#     for row in rows:
+#         rid, name_val, time_val = row[0], row[1], row[2]
+#         display_label = f"{name_val} ({time_val})"
+#         if len(display_label) > 100:
+#             display_label = display_label[:97] + "..."
+            
+#         # We still pass rowid as value for precision
+#         choices.append(app_commands.Choice(name=display_label, value=str(rid)))
+    
+#     return choices
+
+async def event_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    guild_id = str(interaction.guild.id)
+    user_id = str(interaction.user.id)
+    
+    is_admin_view = interaction.command.parent and interaction.command.parent.name == "admin"
+    is_stop_cmd = (interaction.command.name == "stop")
+
+    if is_admin_view:
+        base_query = "SELECT rowid, name, time FROM events WHERE guild_id = ?"
+        params = [guild_id]
+    else:
+        base_query = "SELECT rowid, name, time FROM events WHERE guild_id = ? AND user_id = ?"
+        params = [guild_id, user_id]
+
+    if is_stop_cmd:
+        base_query += " AND lateness IS NULL"
+    
+    base_query += " AND name LIKE ? LIMIT 25"
+    params.append(f'%{current}%')
+
+    rows = query_db(base_query, tuple(params))
+    
+    choices = []
+    for row in rows:
+        rid, name_val, time_val = row[0], row[1], row[2]
+        display_label = f"{name_val} ({time_val})"
+        
+       
+        if len(display_label) > 100:
+            display_label = display_label[:97] + "..."
+            
+        choices.append(app_commands.Choice(name=display_label, value=str(rid)))
+    
+    return choices
+
+async def execute_stop_logic(interaction, event_id_str, members_list, role):
+    
+    name_lookup = query_db("SELECT name FROM events WHERE rowid = ?", (int(event_id_str),), one=True)
+    if not name_lookup:
+        return await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+    
+    actual_event_name = name_lookup[0]
+
+    # 2. Build target member set
+    targets = {m for m in members_list if m}
+    if role:
+        for m in role.members:
+            if not m.bot: targets.add(m)
+    if not targets:
+        targets.add(interaction.user)
+
+    now = datetime.now()
+    guild_id = str(interaction.guild.id)
+    success_count = 0
+    last_diff = 0
+
+    for member in targets:
+        uid = str(member.id)
+        row = query_db(
+            "SELECT rowid, time FROM events WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL ORDER BY rowid DESC LIMIT 1",
+            (uid, guild_id, actual_event_name),
+            one=True
+        )
+        
+        if row:
+            rid, time_str = row[0], row[1]
+            try:
+                # Time Parsing
+                if len(time_str) > 5:
+                    target_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+                else:
+                    target_dt = datetime.strptime(time_str, "%H:%M").replace(
+                        year=now.year, month=now.month, day=now.day
+                    )
+                
+                diff = int((now - target_dt).total_seconds())
+                last_diff = diff
+                
+                # Update the DB
+                query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid))
+                success_count += 1
+            except Exception as e:
+                print(f"Failed for {member.name}: {e}")
+
+    if success_count == 0:
+        return await interaction.response.send_message(f"❌ No active entries for '**{actual_event_name}**' found.", ephemeral=True)
+
+    time_str = f"{abs(last_diff)//60}m {abs(last_diff)%60}s"
+    status = "Early" if last_diff < 0 else "Late"
+    await interaction.response.send_message(
+        f"Stopped '**{actual_event_name}**' for **{success_count}** members. "
+        f"Status: **{status}** ({time_str})."
+    )
 
 init_db()
 
@@ -142,7 +284,7 @@ async def quick(interaction: Interaction,
     
     target_members = set()
     
-    # 1. Calculate the exact Date and Time
+    
     now = datetime.now()
     future_dt = now + timedelta(minutes=minutes)
     # Formats as "2026-05-01 21:45"
@@ -158,7 +300,7 @@ async def quick(interaction: Interaction,
                 target_members.add(m)
                 
     if not target_members:
-        # Default to the user if no one else is specified
+        # Default to user
         target_members.add(interaction.user)
 
     guild_id = str(interaction.guild.id)
@@ -185,11 +327,10 @@ async def list_events(interaction: Interaction, member: discord.Member = None):
     
     for i, (name, timestamp, late, started) in enumerate(rows, 1):
         if late is not None:
-            # Calculate absolute minutes and seconds for display
+            
             m, s = abs(late) // 60, abs(late) % 60
             time_str = f"{m}m {s}s"
             
-            # Label based on original value
             if late < 0:
                 status = f"✅ Early: {time_str}"
             elif late == 0:
@@ -204,8 +345,9 @@ async def list_events(interaction: Interaction, member: discord.Member = None):
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-@event_menu.command(name="stop", description="Stop a specific named event for members/role")
-async def stop(interaction: Interaction, 
+@event_menu.command(name="stop", description="Stop an active event")
+@app_commands.autocomplete(event_name=event_autocomplete)
+async def stop(interaction: discord.Interaction, 
                event_name: str, 
                member1: discord.Member = None, 
                member2: discord.Member = None,
@@ -214,58 +356,13 @@ async def stop(interaction: Interaction,
                member5: discord.Member = None,
                role: discord.Role = None):
     
-    target_members = set()
-    for m in [member1, member2, member3, member4, member5]:
-        if m: target_members.add(m)
+    is_admin = interaction.user.guild_permissions.manage_guild
+    has_targets = any([member1, member2, member3, member4, member5, role])
     
-    if role:
-        for m in role.members:
-            if not m.bot: target_members.add(m)
-                
-    if not target_members:
-        target_members.add(interaction.user)
+    if has_targets and not is_admin:
+        return await interaction.response.send_message("❌ Only admins can stop events for other members!", ephemeral=True)
 
-    now = datetime.now()
-    guild_id = str(interaction.guild.id)
-    success_count = 0
-    last_diff = 0 # To store the diff for the response
-
-    for member in target_members:
-        uid = str(member.id)
-        row = query_db(
-            "SELECT rowid, time FROM events WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL ORDER BY rowid DESC LIMIT 1", 
-            (uid, guild_id, event_name)
-        )
-        
-        if row:
-            internal_id, target_time_str = row[0]
-            try:
-                if len(target_time_str) > 5:
-                    target_dt = datetime.strptime(target_time_str, "%Y-%m-%d %H:%M")
-                else:
-                    target_dt = datetime.strptime(target_time_str, "%H:%M").replace(
-                        year=now.year, month=now.month, day=now.day
-                    )
-                
-                diff = int((now - target_dt).total_seconds())
-                last_diff = diff 
-                
-                query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, internal_id))
-                success_count += 1
-            except Exception as e:
-                print(f"Error processing {member.display_name}: {e}")
-
-    if success_count == 0:
-        return await interaction.response.send_message(f"❌ No active event named '**{event_name}**' found for the specified members.", ephemeral=True)
-
-    # Response Logic
-    unit = "member" if success_count == 1 else "members"
-    time_str = f"{abs(last_diff)//60}m {abs(last_diff)%60}s"
-    
-    if last_diff < 0:
-        await interaction.response.send_message(f"✅ Early arrival! Recorded **-{time_str}** for '**{event_name}**' ({success_count} {unit}).")
-    else:
-        await interaction.response.send_message(f"⏹️ Stopped '**{event_name}**' for **{success_count}** {unit}. Lateness: **{time_str}**.")
+    await execute_stop_logic(interaction, event_name, [member1, member2, member3, member4, member5], role)
 
 # @event_menu.command(name="stop", description="Stop the timer (records negative if early)")
 # async def stop(interaction: Interaction, name: str):
@@ -291,17 +388,78 @@ async def stop(interaction: Interaction,
 #     else:
 #         await interaction.response.send_message(f" Stopped '{name}'. Lateness: **{late_seconds//60}m {late_seconds%60}s**.", ephemeral=True)
 
-@event_menu.command(name="delete", description="Delete one of your events")
-async def delete(interaction: Interaction, name: str):
-    await interaction.response.defer(ephemeral=True)
+# @event_menu.command(name="delete", description="Delete one of your events")
+# async def delete(interaction: Interaction, name: str):
+#     await interaction.response.defer(ephemeral=True)
     
-    try:
-        query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ? AND name = ?", 
-                 (str(interaction.user.id), str(interaction.guild.id), name))
-        await interaction.followup.send(f" Deleted event: '{name}'")
-    except sqlite3.OperationalError:
-        await interaction.followup.send("❌ Database is currently busy. Please try again in a few seconds.")
+#     try:
+#         query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ? AND name = ?", 
+#                  (str(interaction.user.id), str(interaction.guild.id), name))
+#         await interaction.followup.send(f" Deleted event: '{name}'")
+#     except sqlite3.OperationalError:
+#         await interaction.followup.send("❌ Database is currently busy. Please try again in a few seconds.")
 
+# @event_menu.command(name="delete", description="Delete a specific event record")
+# @app_commands.autocomplete(event_name=event_autocomplete)
+# async def delete_event(interaction: Interaction, event_name: str):
+#     target_rowid = event_name 
+#     user_id = str(interaction.user.id) # Get the ID of the person using the command
+
+#     if not target_rowid.isdigit():
+#         return await interaction.response.send_message("❌ Invalid selection. Please use the suggestions.", ephemeral=True)
+
+#     # 1. Fetch record ONLY if it matches the user_id
+#     row = query_db(
+#         "SELECT name, time FROM events WHERE rowid = ? AND guild_id = ? AND user_id = ?", 
+#         (int(target_rowid), str(interaction.guild.id), user_id),
+#         one=True
+#     )
+
+#     if not row:
+#         # If the ID exists but belongs to someone else, this query returns None
+#         return await interaction.response.send_message("❌ Record not found or you don't have permission to delete it.", ephemeral=True)
+
+#     event_name_val = row[0]
+#     event_time_val = row[1]
+
+#     # 2. Perform deletion with the same security check
+#     query_db(
+#         "DELETE FROM events WHERE rowid = ? AND guild_id = ? AND user_id = ?", 
+#         (int(target_rowid), str(interaction.guild.id), user_id)
+#     )
+
+#     await interaction.response.send_message(
+#         f"✅ Record **#{target_rowid}** for **{event_name_val}** ({event_time_val}) deleted successfully.", 
+#         ephemeral=True
+#     )
+
+@event_menu.command(name="delete", description="Delete an event record (Personal)")
+@app_commands.autocomplete(event_name=event_autocomplete)
+async def delete_event(interaction: discord.Interaction, event_name: str):
+    target_rowid = event_name
+    uid = str(interaction.user.id)
+
+    if not target_rowid.isdigit():
+        return await interaction.response.send_message("❌ Invalid selection.", ephemeral=True)
+
+    # get name for msg
+    row = query_db(
+        "SELECT name, time FROM events WHERE rowid = ? AND user_id = ? AND guild_id = ?", 
+        (int(target_rowid), uid, str(interaction.guild.id)),
+        one=True
+    )
+
+    if not row:
+        return await interaction.response.send_message("❌ Record not found or you don't own it.", ephemeral=True)
+
+    event_name_val, event_time_val = row[0], row[1]
+
+    query_db("DELETE FROM events WHERE rowid = ?", (int(target_rowid),))
+    
+    await interaction.response.send_message(
+        f" Deleted **{event_name_val}** ({event_time_val}) from your history.", 
+        ephemeral=True
+    )
 
 @event_menu.command(name="clear", description="Clear all your events in this server")
 async def clear(interaction: Interaction):
@@ -324,12 +482,10 @@ async def list_all(interaction: Interaction):
             msg += f"\n👤 **{uname or f'<@{uid}>'}**\n"
         
         if late is not None:
-            # 1. Always use absolute value for the numbers
             abs_late = abs(late)
             m, s = abs_late // 60, abs_late % 60
             time_str = f"{m}m {s}s"
             
-            # 2. Use the original 'late' value to pick the label/emoji
             if late < 0:
                 emoji = "✅ Early:"
             elif late == 0:
@@ -361,54 +517,152 @@ async def delete_schedule(interaction: Interaction, name: str):
 
 # --- ADMIN COMMANDS ---
 
-@admin_menu.command(name="delete", description="Admin: Delete a specific named event entry")
+# @admin_menu.command(name="delete", description="Admin: Delete a specific named event entry")
+# @app_commands.checks.has_permissions(manage_guild=True)
+# async def admin_delete(interaction: Interaction, 
+#                        event_name: str,
+#                        member1: discord.Member = None, 
+#                        member2: discord.Member = None,
+#                        member3: discord.Member = None,
+#                        member4: discord.Member = None,
+#                        member5: discord.Member = None,
+#                        role: discord.Role = None):
+    
+#     target_members = set()
+#     for m in [member1, member2, member3, member4, member5]:
+#         if m: target_members.add(m)
+    
+#     if role:
+#         for m in role.members:
+#             if not m.bot: target_members.add(m)
+
+#     if not target_members:
+#         target_members.add(interaction.user)
+
+#     guild_id = str(interaction.guild.id)
+#     actually_deleted = 0
+
+#     for member in target_members:
+#         uid = str(member.id)
+        
+#         check = query_db(
+#             "SELECT rowid FROM events WHERE user_id = ? AND guild_id = ? AND name = ? ORDER BY rowid DESC LIMIT 1",
+#             (uid, guild_id, event_name)
+#         )
+        
+#         if check:
+#             target_rowid = check[0][0]
+#             query_db("DELETE FROM events WHERE rowid = ?", (target_rowid,))
+#             actually_deleted += 1
+    
+#     if actually_deleted == 0:
+#         await interaction.response.send_message(
+#             f" No entries found for '**{event_name}**' among the specified members.", 
+#             ephemeral=True
+#         )
+#     else:
+#         unit = "entry" if actually_deleted == 1 else "entries"
+#         await interaction.response.send_message(
+#             f" [ADMIN] Successfully deleted **{actually_deleted}** {unit} of '**{event_name}**'!"
+#         )
+
+# @admin_menu.command(name="delete", description="Admin: Delete a specific named event entry")
+# @app_commands.checks.has_permissions(manage_guild=True)
+# @app_commands.autocomplete(event_name=event_autocomplete)
+# async def admin_delete(interaction: Interaction, 
+#                        event_name: str,
+#                        member1: discord.Member = None, 
+#                        member2: discord.Member = None,
+#                        member3: discord.Member = None,
+#                        member4: discord.Member = None,
+#                        member5: discord.Member = None,
+#                        role: discord.Role = None):
+    
+#     # 1. Resolve Name from Autocomplete Value (the rowid)
+#     # If the admin picked from the list, event_name is a number. 
+#     # We need the string name to apply the delete to the whole group.
+#     actual_event_name = event_name
+#     if event_name.isdigit():
+#         name_query = query_db("SELECT name FROM events WHERE rowid = ?", (int(event_name),), one=True)
+#         if name_query:
+#             actual_event_name = name_query[0]
+
+#     # 2. Collect Target Members
+#     target_members = set()
+#     for m in [member1, member2, member3, member4, member5]:
+#         if m: target_members.add(m)
+    
+#     if role:
+#         for m in role.members:
+#             if not m.bot: target_members.add(m)
+
+#     if not target_members:
+#         target_members.add(interaction.user)
+
+#     guild_id = str(interaction.guild.id)
+#     actually_deleted = 0
+
+#     # 3. Execution Loop
+#     for member in target_members:
+#         uid = str(member.id)
+        
+#         # Look for the most recent entry with this name for this specific member
+#         check = query_db(
+#             "SELECT rowid FROM events WHERE user_id = ? AND guild_id = ? AND name = ? ORDER BY rowid DESC LIMIT 1",
+#             (uid, guild_id, actual_event_name),
+#             one=True # Using your one=True helper
+#         )
+        
+#         if check:
+#             target_rowid = check[0] # check is the tuple (rowid,)
+#             query_db("DELETE FROM events WHERE rowid = ?", (target_rowid,))
+#             actually_deleted += 1
+    
+#     # 4. Response
+#     if actually_deleted == 0:
+#         await interaction.response.send_message(
+#             f"❌ No entries found for '**{actual_event_name}**' among the specified members.", 
+#             ephemeral=True
+#         )
+#     else:
+#         unit = "entry" if actually_deleted == 1 else "entries"
+#         await interaction.response.send_message(
+#             f"✅ [ADMIN] Successfully deleted **{actually_deleted}** {unit} of '**{actual_event_name}**'!"
+#         )
+
+@admin_menu.command(name="delete", description="Admin: Delete event records for members/role")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def admin_delete(interaction: Interaction, 
+@app_commands.autocomplete(event_name=event_autocomplete)
+async def admin_delete(interaction: discord.Interaction, 
                        event_name: str,
                        member1: discord.Member = None, 
-                       member2: discord.Member = None,
-                       member3: discord.Member = None,
-                       member4: discord.Member = None,
-                       member5: discord.Member = None,
                        role: discord.Role = None):
     
-    target_members = set()
-    for m in [member1, member2, member3, member4, member5]:
-        if m: target_members.add(m)
-    
+    actual_name = event_name
+    if event_name.isdigit():
+        res = query_db("SELECT name FROM events WHERE rowid = ?", (int(event_name),), one=True)
+        if res: actual_name = res[0]
+
+    targets = {m for m in [member1] if m}
     if role:
         for m in role.members:
-            if not m.bot: target_members.add(m)
-
-    if not target_members:
-        target_members.add(interaction.user)
+            if not m.bot: targets.add(m)
+    
+    if not targets and event_name.isdigit():
+        query_db("DELETE FROM events WHERE rowid = ?", (int(event_name),))
+        return await interaction.response.send_message(f"✅ Deleted specific record ID #{event_name}.", ephemeral=True)
 
     guild_id = str(interaction.guild.id)
-    actually_deleted = 0
+    deleted_count = 0
+    for member in targets:
+        query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ? AND name = ?", 
+                 (str(member.id), guild_id, actual_name))
+        deleted_count += 1
 
-    for member in target_members:
-        uid = str(member.id)
-        
-        check = query_db(
-            "SELECT rowid FROM events WHERE user_id = ? AND guild_id = ? AND name = ? ORDER BY rowid DESC LIMIT 1",
-            (uid, guild_id, event_name)
-        )
-        
-        if check:
-            target_rowid = check[0][0]
-            query_db("DELETE FROM events WHERE rowid = ?", (target_rowid,))
-            actually_deleted += 1
-    
-    if actually_deleted == 0:
-        await interaction.response.send_message(
-            f" No entries found for '**{event_name}**' among the specified members.", 
-            ephemeral=True
-        )
-    else:
-        unit = "entry" if actually_deleted == 1 else "entries"
-        await interaction.response.send_message(
-            f" [ADMIN] Successfully deleted **{actually_deleted}** {unit} of '**{event_name}**'!"
-        )
+    await interaction.response.send_message(
+        f"🗑️ [ADMIN] Deleted all entries of '**{actual_name}**' for **{deleted_count}** members.",
+        ephemeral=True
+    )
 
 @admin_menu.command(name="clear", description="Admin: Clear ALL user data for members/role")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -428,7 +682,6 @@ async def admin_clear(interaction: Interaction,
         for m in role.members:
             if not m.bot: target_members.add(m)
 
-    # For 'Clear', we force a target to avoid accidental server-wide wipes
     if not target_members:
         return await interaction.response.send_message("❌ Specify who to clear! (Tag someone or a role)", ephemeral=True)
 
@@ -451,31 +704,43 @@ async def admin_clear(interaction: Interaction,
 #     query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ?", (str(member.id), str(interaction.guild.id)))
 #     await interaction.response.send_message(f" Admin: Cleared data for {member.display_name}")
 
-@admin_menu.command(name="stop", description="Admin: Force stop a user's timer (allows negative lateness)")
+# @admin_menu.command(name="stop", description="Admin: Force stop a user's timer (allows negative lateness)")
+# @app_commands.checks.has_permissions(manage_guild=True)
+# async def admin_stop(interaction: Interaction, member: discord.Member, name: str):
+#     uid, gid = str(member.id), str(interaction.guild.id)
+    
+#     row = query_db("SELECT time FROM events WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL", (uid, gid, name), one=True)
+    
+#     if not row: 
+#         return await interaction.response.send_message(f"❌ No active/pending event found for {member.display_name} with that name.", ephemeral=True)
+    
+#     event_time = datetime.strptime(row[0], "%Y-%m-%d %H:%M")
+#     now = datetime.now()
+    
+#     late_seconds = int((now - event_time).total_seconds())
+    
+#     query_db("UPDATE events SET lateness = ?, started = 0 WHERE user_id = ? AND guild_id = ? AND name = ?", 
+#              (late_seconds, uid, gid, name))
+    
+#     if late_seconds < 0:
+#         abs_early = abs(late_seconds)
+#         await interaction.response.send_message(f" Admin: Force-stopped '{name}' early for {member.mention}. Recorded **-{abs_early//60}m {abs_early%60}s**.")
+#     else:
+#         await interaction.response.send_message(f" Admin: Force-stopped '{name}' for {member.mention}. Lateness: **{late_seconds//60}m {late_seconds%60}s**.")
+
+@admin_menu.command(name="stop", description="Admin: Stop an event for anyone")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def admin_stop(interaction: Interaction, member: discord.Member, name: str):
-    uid, gid = str(member.id), str(interaction.guild.id)
+@app_commands.autocomplete(event_name=event_autocomplete)
+async def admin_stop(interaction: discord.Interaction, 
+                     event_name: str, 
+                     member1: discord.Member = None, 
+                     member2: discord.Member = None,
+                     member3: discord.Member = None,
+                     member4: discord.Member = None,
+                     member5: discord.Member = None,
+                     role: discord.Role = None):
     
-    # Look for any event for this user that hasn't been finished (lateness is NULL)
-    row = query_db("SELECT time FROM events WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL", (uid, gid, name), one=True)
-    
-    if not row: 
-        return await interaction.response.send_message(f"❌ No active/pending event found for {member.display_name} with that name.", ephemeral=True)
-    
-    event_time = datetime.strptime(row[0], "%Y-%m-%d %H:%M")
-    now = datetime.now()
-    
-    # Calculate difference (Negative = Early, Positive = Late)
-    late_seconds = int((now - event_time).total_seconds())
-    
-    query_db("UPDATE events SET lateness = ?, started = 0 WHERE user_id = ? AND guild_id = ? AND name = ?", 
-             (late_seconds, uid, gid, name))
-    
-    if late_seconds < 0:
-        abs_early = abs(late_seconds)
-        await interaction.response.send_message(f" Admin: Force-stopped '{name}' early for {member.mention}. Recorded **-{abs_early//60}m {abs_early%60}s**.")
-    else:
-        await interaction.response.send_message(f" Admin: Force-stopped '{name}' for {member.mention}. Lateness: **{late_seconds//60}m {late_seconds%60}s**.")
+    await execute_stop_logic(interaction, event_name, [member1, member2, member3, member4, member5], role)
 
 @admin_menu.command(name="add_record", description="Admin: Add a finished event record")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -550,11 +815,11 @@ async def auto_check():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # User joins a voice channel
+    # User joins vc
     if before.channel is None and after.channel is not None:
         gid, uid = str(member.guild.id), str(member.id)
         
-        # Look for any event for this user that hasn't been finished yet
+        
         active = query_db("SELECT name, time FROM events WHERE user_id = ? AND guild_id = ? AND lateness IS NULL", (uid, gid))
         
         if active:
@@ -563,7 +828,7 @@ async def on_voice_state_update(member, before, after):
                 now = datetime.now()
                 late_seconds = int((now - event_time).total_seconds())
                 
-                # Update the database
+                # Update database
                 query_db("UPDATE events SET lateness = ?, started = 0 WHERE user_id = ? AND guild_id = ? AND name = ?", 
                          (late_seconds, uid, gid, name))
                 
@@ -637,13 +902,11 @@ async def predict_lateness(interaction: Interaction, event_name: str, member: di
 async def retrain_model(interaction: Interaction):
     await interaction.response.defer(ephemeral=True)
     
-    # CHANGE: Use 'ai_pipeline.train()'
     try:
         ai_pipeline.train()
         await interaction.followup.send("✅ Model retrained successfully on new data!")
     except Exception as e:
         await interaction.followup.send(f"❌ Model retraining failed: {e}")
 
-# ... [Keep the rest of your bot code: on_voice_state_update, etc.] ...
 
 bot.run(TOKEN)
