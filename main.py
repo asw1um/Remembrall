@@ -691,7 +691,7 @@ async def admin_clear(interaction: Interaction,
     
     member_count = len(target_members)
     unit = "member" if member_count == 1 else "members"
-    await interaction.response.send_message(f"💥 [ADMIN] Full history wiped for **{member_count}** {unit}!")
+    await interaction.response.send_message(f" [ADMIN] Full history wiped for **{member_count}** {unit}!")
 # @admin_menu.command(name="delete", description="Admin: Delete event from other user")
 # @app_commands.checks.has_permissions(manage_guild=True)
 # async def admin_delete(interaction: Interaction, member: discord.Member, event_name: str):

@@ -5,9 +5,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-# ============================================================
-# LAYER 1 — MATH UTILS
-# ============================================================
+#helper functions
 
 def mse(actual, predicted):
     return mean_squared_error(actual, predicted)
@@ -18,10 +16,8 @@ def mae(actual, predicted):
 def compute_residuals(y_true, y_pred):
     return y_true - y_pred
 
-# ============================================================
-# LAYER 2 — SYMMETRIC DECISION TREE
-# ============================================================
 
+#decision trees
 class SymmetricTree:
     def __init__(self, max_depth=4, min_samples_leaf=5):
         self.max_depth = max_depth
@@ -95,10 +91,7 @@ class SymmetricTree:
         c, _ = self.predict_with_variance(X)
         return c
 
-# ============================================================
-# LAYER 3 — GRADIENT BOOSTING
-# ============================================================
-
+#gradient boosting
 class SimpleCatBoost:
     def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=4, min_samples_leaf=5):
         self.n_estimators, self.learning_rate = n_estimators, learning_rate
@@ -127,9 +120,6 @@ class SimpleCatBoost:
         std_dev = np.sqrt(total_var)
         return np.round(preds, 1), np.round(preds - z * std_dev, 1), np.round(preds + z * std_dev, 1)
 
-# ============================================================
-# LAYER 4 — PREPROCESSOR
-# ============================================================
 
 class Preprocessor:
     def __init__(self, categorical_cols=None):
@@ -161,9 +151,7 @@ class Preprocessor:
             else: res[col] = df[col].values
         return res.values.astype(float)
 
-# ============================================================
-# LAYER 5 — DATABASE & MOCKING
-# ============================================================
+
 
 def load_mock_training_data():
     """Returns fake data to test logic without a real database."""
@@ -174,9 +162,6 @@ def load_mock_training_data():
             data.append({"time": "2026-04-10 09:00", "user_id": uid, "name": name, "minutes_late": avg + np.random.normal(0, 2)})
     return pd.DataFrame(data)
 
-# ============================================================
-# LAYER 6 — PIPELINE
-# ============================================================
 
 class LatenessPipeline:
     def __init__(self, use_mock=False):
@@ -213,22 +198,18 @@ def setup_tables():
     This is called by main.py during the init_db process.
     """
     import sqlite3
-    # Use the same DB name as your main bot
+
     conn = sqlite3.connect("events.db") 
     c = conn.cursor()
     
-    # Example: A table to store user-specific AI preferences or offsets
-    # You can leave this empty for now, or use it to ensure the 'events' 
-    # table structure is exactly what the AI expects.
     c.execute('''CREATE TABLE IF NOT EXISTS ml_metadata 
                  (key TEXT PRIMARY KEY, value TEXT)''')
     
     conn.commit()
     conn.close()
     print("ML specific tables verified.")
-# ============================================================
-# EXECUTION
-# ============================================================
+
+# mock verification
 
 if __name__ == "__main__":
     print("Testing AI logic locally...")
