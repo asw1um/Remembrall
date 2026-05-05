@@ -29,27 +29,31 @@ async def get_db():
         await db_conn.execute("PRAGMA synchronous=NORMAL;")
     return db_conn
 
+
+
 async def init_db():
     """Initializes tables using the async connection logic."""
     db = await get_db()
-    await db.execute("""CREATE TABLE IF NOT EXISTS events
-                         (guild_id TEXT, user_id TEXT, username TEXT,
-                          name TEXT, time TEXT, lateness INTEGER, started INTEGER)""")
-    await db.execute("""CREATE TABLE IF NOT EXISTS schedules
-                         (guild_id TEXT, user_id TEXT, username TEXT,
-                          name TEXT, day_of_week INTEGER, time_24h TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS events (guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, time TEXT, lateness INTEGER, started INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS schedules(guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, day_of_week INTEGER, time_24h TEXT)""")
     
-    # Check for missing columns (Migrations)
+
     cursor = await db.execute("PRAGMA table_info(events)")
     cols = [row[1] for row in await cursor.fetchall()]
     if "guild_id" not in cols:
         await db.execute("ALTER TABLE events ADD COLUMN guild_id TEXT")
-    
+
+    if "dm_sent" not in cols:
+        await db.execute("ALTER TABLE events ADD COLUMN dm_sent INTEGER DEFAULT 0")
+ 
     cursor = await db.execute("PRAGMA table_info(schedules)")
     cols = [row[1] for row in await cursor.fetchall()]
     if "guild_id" not in cols:
         await db.execute("ALTER TABLE schedules ADD COLUMN guild_id TEXT")
 
+    if "end_time_24h" not in cols:
+        await db.execute("ALTER TABLE schedules ADD COLUMN end_time_24h TEXT")
+ 
     await asyncio.to_thread(setup_tables)
     await db.commit()
 
@@ -99,12 +103,7 @@ async def event_autocomplete(interaction: discord.Interaction, current: str) -> 
         return choices
     elif cmd_name == "predict":
 
-        rows = await query_db(
-            "SELECT rowid, name, time, username FROM events "
-            "WHERE guild_id = ? AND lateness IS NULL AND name LIKE ? "
-            "ORDER BY time ASC LIMIT 25",
-            (guild_id, f"%{current}%")
-        )
+        rows = await query_db( "SELECT rowid, name, time, username FROM events ""WHERE guild_id = ? AND lateness IS NULL AND name LIKE ? ""ORDER BY time ASC LIMIT 25",(guild_id, f"%{current}%") )
         return [
             app_commands.Choice(name=f"{r[3]}: {r[1]} [{r[2]}]"[:100], value=str(r[0]))
             for r in rows
@@ -135,9 +134,7 @@ async def event_autocomplete(interaction: discord.Interaction, current: str) -> 
 # stop logic
 
 async def execute_stop_logic(interaction, event_id_str, members_list, role):
-    name_lookup = await query_db(
-        "SELECT name FROM events WHERE rowid = ?", (int(event_id_str),), one=True
-    )
+    name_lookup = await query_db( "SELECT name FROM events WHERE rowid = ?", (int(event_id_str),), one=True )
     if not name_lookup:
         return await interaction.response.send_message("❌ Event not found.", ephemeral=True)
 
@@ -155,12 +152,7 @@ async def execute_stop_logic(interaction, event_id_str, members_list, role):
 
     for member in targets:
         uid = str(member.id)
-        row = await query_db(
-            "SELECT rowid, time FROM events "
-            "WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL "
-            "ORDER BY rowid DESC LIMIT 1",
-            (uid, guild_id, actual_event_name), one=True
-        )
+        row = await query_db( "SELECT rowid, time FROM events " "WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL " "ORDER BY rowid DESC LIMIT 1", (uid, guild_id, actual_event_name), one=True )
         if row:
             rid, time_str = row[0], row[1]
             try:
@@ -170,9 +162,7 @@ async def execute_stop_logic(interaction, event_id_str, members_list, role):
                     target_dt = target_dt.replace(year=now.year, month=now.month, day=now.day)
                 diff      = int((now - target_dt).total_seconds())
                 last_diff = diff
-                await query_db(
-                    "UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid)
-                )
+                await query_db( "UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid) )
                 success_count += 1
             except Exception as e:
                 print(f"[Stop] Failed for {member.name}: {e}")
@@ -188,6 +178,30 @@ async def execute_stop_logic(interaction, event_id_str, members_list, role):
         f"Stopped '**{actual_event_name}**' for **{success_count}** member(s). "
         f"Status: **{status}** ({m}m {s}s)."
     )
+
+async def check_upcoming_events():
+    now = datetime.now()
+    upcoming = await query_db(
+        "SELECT rowid, user_id, name, time FROM events "
+        "WHERE lateness IS NULL AND dm_sent = 0"
+    )
+
+    for eid, uid, name, timestamp in upcoming:
+        event_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M") # adjust format as needed
+        diff = (event_dt - now).total_seconds()
+
+        #  event 30 mins away
+        if 0 < diff <= 1800:
+            user = bot.get_user(int(uid))
+            if user:
+                view = CheckInView(event_id=eid)
+                await user.send(
+                    f"⏲️ **Upcoming Event:** '{name}' starts in {int(diff//60)} minutes!\n"
+                    "Click below to check in early if you're already settled in.",
+                    view=view
+                )
+                #no spam
+                await query_db("UPDATE events SET dm_sent = 1 WHERE rowid = ?", (eid,))
 
 #buttons
 class ClearConfirm(ui.View):
@@ -205,7 +219,6 @@ class ClearConfirm(ui.View):
         self.value = False
         self.stop()
 
-#for delete
 class DeleteConfirm(ui.View):
     def __init__(self):
         super().__init__(timeout=20)
@@ -221,6 +234,72 @@ class DeleteConfirm(ui.View):
         self.value = False
         self.stop()
 
+class CheckInView(discord.ui.View):
+    def __init__(self, event_id: int, end_time_str: str = None):
+        super().__init__(timeout=None) 
+        self.event_id = event_id
+        self.end_time_str = end_time_str  # Passed from the schedule
+ 
+    @discord.ui.button(label="Check In Now", style=discord.ButtonStyle.green, emoji="✅")
+    async def check_in(self, interaction: discord.Interaction, button: discord.ui.Button):
+        row = await query_db(
+            "SELECT name, time, user_id, lateness, guild_id FROM events WHERE rowid = ?", 
+            (self.event_id,), 
+            one=True
+        )
+ 
+        if not row:
+            return await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+        
+        name, timestamp, uid, current_lateness, guild_id = row
+ 
+        if current_lateness is not None:
+            return await interaction.response.send_message("⚠️ You already checked in!", ephemeral=True)
+ 
+        now = datetime.now()
+
+        try:
+            event_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Event timestamp is malformed. Contact an admin.", ephemeral=True
+            )
+ 
+        #end time check
+        if self.end_time_str:
+            try:
+                deadline = datetime.strptime(
+                    f"{event_dt.strftime('%Y-%m-%d')} {self.end_time_str}", "%Y-%m-%d %H:%M"
+                )
+                if now > deadline:
+                    button.disabled = True
+                    button.label = "Event Ended"
+                    button.style = discord.ButtonStyle.secondary
+                    await interaction.response.edit_message(view=self)
+                    return await interaction.followup.send(
+                        "❌ This event has already ended. You cannot check in anymore.", ephemeral=True
+                    )
+            except ValueError:
+                pass  
+ 
+        diff = int((now - event_dt).total_seconds())
+        await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, self.event_id))
+ 
+        m, s = abs(diff) // 60, abs(diff) % 60
+        status = "early" if diff < 0 else "late"
+ 
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(f"✅ Checked in! You were **{m}m {s}s {status}**.")
+ 
+        guild = bot.get_guild(int(guild_id))
+        if guild:
+            chan = discord.utils.get(guild.text_channels, name="general")
+            if chan:
+                await chan.send(
+                    f"🕒 **{interaction.user.display_name}** checked in! "
+                    f"({m}m {s}s {status} for '**{name}**')"
+                )
 
 #bot setup
 
@@ -239,6 +318,7 @@ admin_menu = AdminGroup()
 
 # events
 
+
 @event_menu.command(name="create", description="Manual: Set a specific date/time for members")
 async def create(interaction: Interaction,
                  name: str, year: int, month: int, day: int, time_24h: str,
@@ -253,48 +333,89 @@ async def create(interaction: Interaction,
         targets.add(interaction.user)
 
     try:
-        dt_str   = f"{year}-{month:02d}-{day:02d} {time_24h}"
+        dt_str = f"{year}-{month:02d}-{day:02d} {time_24h}"
         guild_id = str(interaction.guild.id)
         names_list = []
+
         for member in targets:
-            await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, started) " "VALUES (?, ?, ?, ?, ?, NULL, 0)", (guild_id, str(member.id), member.name, name, dt_str))
+            await query_db(
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) "
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)", 
+                (guild_id, str(member.id), member.name, name, dt_str)
+            )
+            
+            last_row = await query_db("SELECT last_insert_rowid()", one=True)
+            event_id = last_row[0]
+
+            try:
+                view = CheckInView(event_id=event_id)
+                await member.send(
+                    f"📅 **New Event Scheduled:** '{name}'\n"
+                    f"⏰ Time: **{dt_str}**\n\n"
+                    "Use the button below to check in when you arrive!",
+                    view=view
+                )
+            except discord.Forbidden:
+                print(f"Could not DM {member.name}")
+
             names_list.append(member.mention)
+
         members_name_str = " ".join(names_list)
         unit = "member" if len(targets) == 1 else "members"
         await interaction.response.send_message(
             f"📅 Scheduled **{name}** on {dt_str} for {len(targets)} {unit}:\n {members_name_str}"
         )
-    except Exception:
+
+    except Exception as e:
+        print(f"Error in create: {e}")
         await interaction.response.send_message(
             "❌ Format error. Ensure time is HH:MM (24h).", ephemeral=True
         )
 
-@event_menu.command(name="create_quick", description="Create a quick event N minutes from now")
-async def quick(interaction: Interaction,
-                name: str, minutes: int,
-                member1: discord.Member = None, member2: discord.Member = None,
-                member3: discord.Member = None, member4: discord.Member = None,
-                member5: discord.Member = None, role: discord.Role = None):
-
+@event_menu.command(name="create_quick", description="Quick: Set event for 'now' for members")
+async def create_quick(interaction: Interaction, 
+                       name: str, minutes: int,
+                       member1: discord.Member = None, member2: discord.Member = None,
+                       member3: discord.Member = None, member4: discord.Member = None,
+                       member5: discord.Member = None, role: discord.Role = None):
+    
     targets = {m for m in [member1, member2, member3, member4, member5] if m}
     if role:
         targets.update(m for m in role.members if not m.bot)
     if not targets:
         targets.add(interaction.user)
 
+    now = datetime.now()
     dt_str   = (datetime.now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M")
-    names_list = []
     guild_id = str(interaction.guild.id)
+    names_list = []
+
     for member in targets:
         await query_db(
-            "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started) "
-            "VALUES (?, ?, ?, ?, ?, NULL, 0)",
+            "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) "
+            "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)", 
             (guild_id, str(member.id), member.name, name, dt_str)
         )
+        
+        last_row = await query_db("SELECT last_insert_rowid()", one=True)
+        event_id = last_row[0]
+
+        try:
+            view = CheckInView(event_id=event_id)
+            await member.send(
+                f"⚡ **Quick Event Started:** '{name}'\n"
+                f"⏰ Started at: **{dt_str}**\n\n"
+                "Click the button below to check in right now!",
+                view=view
+            )
+        except discord.Forbidden:
+            print(f"Could not DM {member.name}")
+
         names_list.append(member.mention)
+
     members_name_str = " ".join(names_list)
     unit = "member" if len(targets) == 1 else "members"
-    # Calculate clean hour/minute values
+
     total_hours = minutes // 60
     remaining_mins = minutes % 60
     
@@ -302,8 +423,9 @@ async def quick(interaction: Interaction,
     if total_hours > 0:
         duration_str += f"{total_hours}h "
     duration_str += f"{remaining_mins}m"
-
-    await interaction.response.send_message(f"✅ Quick event '**{name}**' set for **{dt_str}** "f"({duration_str} from now) for {len(targets)} {unit}:\n"f"{members_name_str}")
+    await interaction.response.send_message(
+        f"✅ Quick event '**{name}**' set for **{dt_str}** "f"({duration_str} from now) for {len(targets)} {unit}:\n"f"{members_name_str}"
+    )
 
 
 @event_menu.command(name="list", description="List your events")
@@ -413,9 +535,8 @@ async def clear(interaction: Interaction):
     else:
         await interaction.edit_original_response(content="❌ Clear cancelled.", view=None)
 
-
-@event_menu.command(name="add_schedule", description="Set a recurring weekly event")
-async def add_schedule(interaction: Interaction, name: str, day: str, time_24h: str):
+@event_menu.command(name="add_schedule", description="Set a recurring weekly event with an end time")
+async def add_schedule(interaction: Interaction, name: str, day: str, start_time: str, end_time: str):
     day_map = {
         "mon": 0, "monday": 0,
         "tue": 1, "tuesday": 1,
@@ -426,23 +547,26 @@ async def add_schedule(interaction: Interaction, name: str, day: str, time_24h: 
         "sun": 6, "sunday": 6
     }
     day_clean = day.lower().strip()
-    day_index = day_map.get(day_clean)
-    if day_index is None:
-        day_index = day_map.get(day_clean[:3])
+    day_index = day_map.get(day_clean) or day_map.get(day_clean[:3])
 
     if day_index is None:
-        return await interaction.response.send_message("❌ Invalid day. Please use 'Monday', 'Mon', etc.", ephemeral=True )
+        return await interaction.response.send_message("❌ Invalid day. Please use 'Monday', 'Mon', etc.", ephemeral=True)
+    
     try:
-        datetime.strptime(time_24h, "%H:%M")
+        datetime.strptime(start_time, "%H:%M")
+        datetime.strptime(end_time, "%H:%M")
     except ValueError:
-        return await interaction.response.send_message("❌ Invalid time format. Use HH:MM (e.g., 14:30 or 09:00).", ephemeral=True )
+        return await interaction.response.send_message("❌ Invalid time format. Use HH:MM (e.g., 14:30).", ephemeral=True)
 
-    await query_db("INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h) VALUES (?, ?, ?, ?, ?, ?)",
-                   (str(interaction.guild.id), str(interaction.user.id), interaction.user.display_name, name, day_index, time_24h)
+    await query_db(
+        "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day_index, start_time, end_time)
     )
     
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    await interaction.response.send_message(f"🗓️ Recurring event **{name}** set for every **{days_list[day_index]}** at **{time_24h}**.")
+    await interaction.response.send_message(
+        f"🗓️ Recurring event **{name}** set for every **{days_list[day_index]}** from **{start_time}** to **{end_time}**."
+    )
 
 @event_menu.command(name="delete_schedule", description="Delete a recurring schedule")
 @app_commands.autocomplete(name=event_autocomplete)
@@ -536,41 +660,23 @@ async def list_schedule(interaction: Interaction):
 async def predict_lateness(interaction: Interaction, event_name: str, member: discord.Member = None):
     gid = str(interaction.guild.id)
     
-    # 1. Fetch the event record
-    row = await query_db(
-        "SELECT name, time, user_id, username FROM events WHERE rowid = ? AND guild_id = ?", 
-        (event_name, gid),
-        one=True
-    )
+
+    row = await query_db("SELECT name, time, user_id, username FROM events WHERE rowid = ? AND guild_id = ?",  (event_name, gid), one=True )
     
     if not row:
-        return await interaction.response.send_message(
-            "❌ Could not find that specific ongoing event.", ephemeral=True
-        )
+        return await interaction.response.send_message( "❌ Could not find that specific ongoing event.", ephemeral=True)
 
     actual_name, event_time, event_owner_id, event_owner_name = row
     
-    # Target is the tagged member, or the owner of the event record
     target_id = str(member.id) if member else event_owner_id
     target_name = member.display_name if member else event_owner_name
 
-    # 2. Run the AI Pipeline
-    # pred_res: The main prediction
-    # lower_res: The "earliest" likely arrival
-    # upper_res: The "latest" likely arrival
-    pred_res, lower_res, upper_res = ai_pipeline.predict_with_confidence(
-        user_id=target_id, 
-        event_name=actual_name, 
-        event_time=event_time
-    )
+
+    pred_res, lower_res, upper_res = ai_pipeline.predict_with_confidence(user_id=target_id, event_name=actual_name, event_time=event_time )
 
     if pred_res is None:
-        return await interaction.response.send_message(
-            f"❌ Not enough historical data to predict for **{target_name}**.", 
-            ephemeral=True
-        )
+        return await interaction.response.send_message( f"❌ Not enough historical data to predict for **{target_name}**.",   ephemeral=True)
 
-    # 3. Formatting Helper
     def fmt(mins):
         val = float(mins[0]) if isinstance(mins, (list, np.ndarray)) else float(mins)
         total_seconds = abs(int(val * 60))
@@ -578,7 +684,6 @@ async def predict_lateness(interaction: Interaction, event_name: str, member: di
         status = "Early" if val < 0 else "Late"
         return f"{m}m {s}s {status}"
 
-    # 4. Final Response with Range
     prediction_text = (
         f"🔮 **AI Prediction** for '**{actual_name}**'\n"
         f"👤 Target: **{target_name}**\n"
@@ -602,7 +707,7 @@ async def admin_delete(interaction: discord.Interaction, event_name: str,
         res = await query_db("SELECT name FROM events WHERE rowid = ?", (int(event_name),), one=True)
         if res: actual_name = res[0]
 
-    targets = {m for m in [member1] if m}
+    targets = {m for m in [member1,member2, member3,member4, member5] if m}
     if role:
         targets.update(m for m in role.members if not m.bot)
     target_desc = f"**{len(targets)} members**" if targets else f"**Record ID #{event_name}**"
@@ -621,8 +726,7 @@ async def admin_delete(interaction: discord.Interaction, event_name: str,
     guild_id = str(interaction.guild.id)
     deleted_count = 0
     for member in targets:
-        await query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ? AND name = ?", 
-                       (str(member.id), guild_id, actual_name))
+        await query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ? AND name = ?", (str(member.id), guild_id, actual_name))
         deleted_count += 1
 
     await interaction.edit_original_response(content=f" [ADMIN] Deleted all entries of '**{actual_name}**' for **{deleted_count}** members.",view=None )
@@ -644,10 +748,7 @@ async def admin_clear(interaction: discord.Interaction, event_name: str,
     view = DeleteConfirm()
     count = len(target_members)
     await interaction.response.send_message(
-        f"❗ **DANGER**: You are about to wipe the **ENTIRE HISTORY** for **{count}** members. This cannot be undone. Proceed?",
-        view=view,
-        ephemeral=True
-    )
+        f"❗ **DANGER**: You are about to wipe the **ENTIRE HISTORY** for **{count}** members. This cannot be undone. Proceed?", view=view,  ephemeral=True )
 
     await view.wait()
     if not view.value:
@@ -722,7 +823,7 @@ async def admin_add_schedule(interaction: Interaction,
     if day_input not in day_map: 
         return await interaction.response.send_message("❌ Invalid day.", ephemeral=True)
     
-    day_index = day_map.index(day_input)
+    day_index = day_map[day_input]
     gid = str(interaction.guild.id)
 
     targets = {m for m in [member1, member2, member3, member4, member5] if m}
@@ -734,10 +835,7 @@ async def admin_add_schedule(interaction: Interaction,
 
     mentions = []
     for member in targets:
-        await query_db(
-            "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h) VALUES (?, ?, ?, ?, ?, ?)", 
-            (gid, str(member.id), member.name, name, day_index, time_24h)
-        )
+        await query_db( "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h) VALUES (?, ?, ?, ?, ?, ?)", (gid, str(member.id), member.name, name, day_index, time_24h) )
         mentions.append(member.mention)
 
     await interaction.response.send_message(
@@ -814,48 +912,157 @@ async def admin_import(interaction: Interaction, json_data: str):
     except Exception as ex: await interaction.response.send_message(f"❌ Error: {ex}", ephemeral=True)
 
 
+# @tasks.loop(seconds=30)
+# async def auto_check():
+#     now = datetime.now()
+#     now_str = now.strftime("%Y-%m-%d %H:%M")
+#     time_str = now.strftime("%H:%M")
+#     day_idx = now.weekday()
+#     today_str = now.strftime("%Y-%m-%d")  # used for date-prefix dedup
+ 
+#     # We grab end_time_24h here so we can pass it to the DM
+#     recurring = await query_db("SELECT guild_id, user_id, username, name, end_time_24h FROM schedules " "WHERE day_of_week = ? AND time_24h = ?",  (day_idx, time_str) )
+    
+#     for gid, uid, uname, name, end_t in recurring:
+#         exists = await query_db("SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time LIKE ?", (uid, name, f"{today_str}%"), one=True)
+#         if not exists:
+#             await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) ""VALUES (?, ?, ?, ?, ?, NULL, 0, 0)", (gid, uid, uname, name, now_str) )
+ 
+#     to_notify = await query_db("SELECT rowid, user_id, name, time FROM events " "WHERE time <= ? AND time >= ? AND dm_sent = 0 AND lateness IS NULL",  (now_str, yesterday_str) )
+    
+#     for eid, uid, name, etime in to_notify:
+#         try:
+#             user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+#             if user:
+#                 # Look back at the schedule to get end_time so the button expires correctly
+#                 sched_data = await query_db( "SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?", (str(uid), name), one=True )
+#                 end_val = sched_data[0] if sched_data else None
+ 
+#                 view = CheckInView(event_id=eid, end_time_str=end_val)
+                
+#                 embed = discord.Embed(
+#                     title="⌛ THE CLOCK IS TICKING",
+#                     description=(  f"Your event **{name}** has started!\n\n"  f"Check in before **{end_val or 'the deadline'}**." ),color=0xFFD700)
+#                 await user.send(embed=embed, view=view)
+#                 await query_db("UPDATE events SET dm_sent = 1, started = 1 WHERE rowid = ?", (eid,))
+#         except Exception as e:
+#             print(f"Error in auto_check ping: {e}")
+ 
+#     if now.second < 30:
+#         thirty_mins_ago = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
+#         late_30 = await query_db("SELECT user_id, name FROM events WHERE time = ? AND lateness IS NULL", (thirty_mins_ago,) )
+#         for uid, name in late_30:
+#             try:
+#                 user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+#                 if user:
+#                     await user.send(f"⚠️ **30 MINUTES LATE:** You still haven't checked in for **{name}**! Get in here!")
+#             except:
+#                 continue
 
-# auto start
+LEAD_MINUTES = 120  # 2 hours 
+
 @tasks.loop(seconds=30)
 async def auto_check():
     now = datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M")
+    today_str = now.strftime("%Y-%m-%d")
     day_idx = now.weekday()
-    time_str = now.strftime("%H:%M")
-    recurring = await query_db(
-        "SELECT guild_id, user_id, username, name FROM schedules WHERE day_of_week = ? AND time_24h = ?", 
-        (day_idx, time_str)
-    )
-    for gid, uid, uname, name in recurring:
-        exists = await query_db("SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time = ?", (uid, name, now_str), one=True)
-        if not exists:
-            await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started) VALUES (?, ?, ?, ?, ?, NULL, 1)", 
-                (gid, uid, uname, name, now_str)
-            )
-    to_notify = await query_db(
-        "SELECT user_id, name, guild_id FROM events WHERE time <= ? AND started = 0 AND lateness IS NULL", 
-        (now_str,)
-    )
-    for uid, name, gid in to_notify:
-        user = bot.get_user(int(uid))
-        if not user:
+    yesterday_str = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+
+    # fetches all today's schedules-2h
+    all_today = await query_db( "SELECT guild_id, user_id, username, name, end_time_24h, time_24h " "FROM schedules WHERE day_of_week = ?", (day_idx,))
+
+    for gid, uid, uname, name, end_t, start_t in all_today:
+        try:
+            start_dt = datetime.strptime(f"{today_str} {start_t}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+
+        diff_minutes = (start_dt - now).total_seconds() / 60
+
+        # Trigger if now is within [start - 2h, start + 1min grace]
+        if not (-1 < diff_minutes <= LEAD_MINUTES):
+            continue
+
+        # Dedup: if any event for this user+name exists today, skip
+        exists = await query_db( "SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time LIKE ?"(uid, name, f"{today_str}%"), one=True )
+        if exists:
+            continue
+
+        actual_start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+        await query_db( "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, actual_start_str))
+
+    #old notify
+    to_notify = await query_db( "SELECT rowid, user_id, name, time FROM events ""WHERE dm_sent = 0 AND lateness IS NULL AND time >= ?",(yesterday_str,))
+
+    for eid, uid, name, etime in to_notify:
+        try:
+            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+            if user:
+                sched_data = await query_db( "SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?",(str(uid), name), one=True )
+                end_val = sched_data[0] if sched_data else None
+
+                # Tell the user how far away the start is
+                try:
+                    start_dt = datetime.strptime(etime, "%Y-%m-%d %H:%M")
+                    mins_until = int((start_dt - now).total_seconds() / 60)
+                    time_msg = f"starts in **{mins_until} minutes**" if mins_until > 0 else "has started"
+                except ValueError:
+                    time_msg = "is starting soon"
+
+                view = CheckInView(event_id=eid, end_time_str=end_val)
+                embed = discord.Embed(
+                    title="⌛ THE CLOCK IS TICKING",
+                    description=(f"Your event **{name}** {time_msg}!\n\n"f"Check in before **{end_val or 'the deadline'}**."), color=0xFFD700 )
+                await user.send(embed=embed, view=view)
+                await query_db("UPDATE events SET dm_sent = 1, started = 1 WHERE rowid = ?", (eid,))
+        except Exception as e:
+            print(f"Error in auto_check ping: {e}")
+
+    #30 min later dm
+    if now.second < 30:
+        thirty_mins_ago = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
+        late_30 = await query_db("SELECT user_id, name FROM events WHERE time = ? AND lateness IS NULL",(thirty_mins_ago,) )
+        for uid, name in late_30:
             try:
-                user = await bot.fetch_user(int(uid))
+                user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+                if user:
+                    await user.send(
+                        f"⚠️ **30 MINUTES LATE:** You still haven't checked in for **{name}**! Get in here!"
+                    )
             except:
                 continue
 
-        if user:
-            embed = discord.Embed( title="⌛ THE CLOCK IS TICKING",description=(f"Your event **{name}** has officially started!\n\n""### Action Required\n""Join the voice channel now to stop the lateness timer."),color=0xFFD700) # gold/yellow
+        # check end time
+        open_events = await query_db("SELECT rowid, user_id, name, time FROM events ""WHERE lateness IS NULL AND dm_sent = 1 AND time >= ?", (yesterday_str,) )
+
+        for eid, uid, name, start_str in open_events:
+            sched = await query_db(
+                "SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?",
+                (str(uid), name), one=True
+            )
+            if not sched or not sched[0]:
+                continue
+
             try:
-                await user.send(embed=embed)
-            except discord.Forbidden:
-                print(f"Could not DM {uid}")
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+                end_dt   = datetime.strptime( f"{start_dt.strftime('%Y-%m-%d')} {sched[0]}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
 
+            if now < end_dt:
+                continue 
 
-    await query_db("UPDATE events SET started = 1 WHERE time <= ? AND started = 0 AND lateness IS NULL", (now_str,))
+            max_lateness = int((end_dt - start_dt).total_seconds())
+            await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (max_lateness, eid))
 
-
+            try:
+                user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+                if user:
+                    m = max_lateness // 60
+                    await user.send(f"❌ **{name}** has ended and you never checked in. " f"Logged as **{m}m late** (full event duration).")
+            except:
+                pass
 
 #vc
 @bot.event
@@ -898,11 +1105,14 @@ async def on_voice_state_update(member, before, after):
         except Exception as e:
             print(f"Error in on_voice_state_update: {e}")
 
+
 @bot.event
 async def on_ready():
     await init_db()
     bot.tree.add_command(event_menu)
     bot.tree.add_command(admin_menu)
+
+
     await bot.tree.sync()
     
     try:
