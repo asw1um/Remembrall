@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from lateness_model import LatenessPipeline, setup_tables
 from discord import ButtonStyle, ui
+import numpy as np
 
 # get token and file
 load_dotenv()
@@ -96,18 +97,30 @@ async def event_autocomplete(interaction: discord.Interaction, current: str) -> 
             label = f"{r[4]}: {r[1]} ({days[r[2]]} @ {r[3]})" if is_admin_view else f"{r[1]} ({days[r[2]]} @ {r[3]})"
             choices.append(app_commands.Choice(name=label[:100], value=str(r[0])))
         return choices
+    elif cmd_name == "predict":
 
+        rows = await query_db(
+            "SELECT rowid, name, time, username FROM events "
+            "WHERE guild_id = ? AND lateness IS NULL AND name LIKE ? "
+            "ORDER BY time ASC LIMIT 25",
+            (guild_id, f"%{current}%")
+        )
+        return [
+            app_commands.Choice(name=f"{r[3]}: {r[1]} [{r[2]}]"[:100], value=str(r[0]))
+            for r in rows
+        ]
     else:
-
         filter_sql = ""
         if cmd_name == "stop":
-            filter_sql = " AND lateness IS NULL"  # Only ongoing events
+            filter_sql = " AND lateness IS NULL"
             
+        sort_order = "ASC" if cmd_name == "stop" else "DESC"
+
         if is_admin_view:
-            query = f"SELECT rowid, name, time, username FROM events WHERE guild_id = ?{filter_sql} AND name LIKE ? ORDER BY time DESC LIMIT 25"
+            query = f"SELECT rowid, name, time, username FROM events WHERE guild_id = ?{filter_sql} AND name LIKE ? ORDER BY time {sort_order} LIMIT 25"
             params = (guild_id, f"%{current}%")
         else:
-            query = f"SELECT rowid, name, time, username FROM events WHERE guild_id = ? AND user_id = ?{filter_sql} AND name LIKE ? ORDER BY time DESC LIMIT 25"
+            query = f"SELECT rowid, name, time, username FROM events WHERE guild_id = ? AND user_id = ?{filter_sql} AND name LIKE ? ORDER BY time {sort_order} LIMIT 25"
             params = (guild_id, uid, f"%{current}%")
 
         rows = await query_db(query, params)
@@ -117,6 +130,7 @@ async def event_autocomplete(interaction: discord.Interaction, current: str) -> 
             label = f"{r[3]}: {r[1]} [{r[2]}]" if is_admin_view else f"{r[1]} [{r[2]}]"
             choices.append(app_commands.Choice(name=label[:100], value=str(r[0])))
         return choices
+
 
 # stop logic
 
@@ -477,45 +491,102 @@ async def list_schedule(interaction: Interaction):
 
     await interaction.response.send_message(schedule_list, ephemeral=True)
 
-@event_menu.command(name="predict", description="AI Predict lateness")
+# @event_menu.command(name="predict", description="AI Predict lateness")
+# @app_commands.autocomplete(event_name=event_autocomplete)
+# async def predict_lateness(interaction: Interaction, event_name: str, member: discord.Member = None):
+#     target = member or interaction.user
+    
+#     row = await query_db(
+#         "SELECT name, time FROM events WHERE rowid = ?", 
+#         (event_name,),
+#         one=True
+#     )
+#     if not row:
+#         return await interaction.response.send_message(
+#             "❌ Could not find that specific event record.", ephemeral=True
+#         )
+
+#     actual_name = row[0]
+#     event_time  = row[1]
+
+#     pred_res, lower_res, upper_res = ai_pipeline.predict_with_confidence(
+#         user_id=str(target.id), 
+#         event_name=actual_name, 
+#         event_time=event_time
+#     )
+
+#     if pred_res is None:
+#         return await interaction.response.send_message(
+#             f"❌ Not enough historical data for **{target.display_name}** on event '**{actual_name}**'.", 
+#             ephemeral=True
+#         )
+
+#     def fmt(mins):
+#         total = abs(int(mins * 60))
+#         m, s = divmod(total, 60)    #min, sec
+#         status = "Early" if mins < 0 else "Late"
+#         return f"{m}m {s}s {status}"
+
+#     await interaction.response.send_message(
+#         f"🔮 Prediction: **{target.display_name}** is going to be **{fmt(pred_res[0])}** for '**{actual_name}**'."
+#     )
+
+@event_menu.command(name="predict", description="AI Predict lateness with confidence range")
 @app_commands.autocomplete(event_name=event_autocomplete)
 async def predict_lateness(interaction: Interaction, event_name: str, member: discord.Member = None):
-    target = member or interaction.user
+    gid = str(interaction.guild.id)
     
+    # 1. Fetch the event record
     row = await query_db(
-        "SELECT name, time FROM events WHERE rowid = ?", 
-        (event_name,),
+        "SELECT name, time, user_id, username FROM events WHERE rowid = ? AND guild_id = ?", 
+        (event_name, gid),
         one=True
     )
+    
     if not row:
         return await interaction.response.send_message(
-            "❌ Could not find that specific event record.", ephemeral=True
+            "❌ Could not find that specific ongoing event.", ephemeral=True
         )
 
-    actual_name = row[0]
-    event_time  = row[1]
+    actual_name, event_time, event_owner_id, event_owner_name = row
+    
+    # Target is the tagged member, or the owner of the event record
+    target_id = str(member.id) if member else event_owner_id
+    target_name = member.display_name if member else event_owner_name
 
+    # 2. Run the AI Pipeline
+    # pred_res: The main prediction
+    # lower_res: The "earliest" likely arrival
+    # upper_res: The "latest" likely arrival
     pred_res, lower_res, upper_res = ai_pipeline.predict_with_confidence(
-        user_id=str(target.id), 
+        user_id=target_id, 
         event_name=actual_name, 
         event_time=event_time
     )
 
     if pred_res is None:
         return await interaction.response.send_message(
-            f"❌ Not enough historical data for **{target.display_name}** on event '**{actual_name}**'.", 
+            f"❌ Not enough historical data to predict for **{target_name}**.", 
             ephemeral=True
         )
 
+    # 3. Formatting Helper
     def fmt(mins):
-        total = abs(int(mins * 60))
-        m, s = divmod(total, 60)    #min, sec
-        status = "Early" if mins < 0 else "Late"
+        val = float(mins[0]) if isinstance(mins, (list, np.ndarray)) else float(mins)
+        total_seconds = abs(int(val * 60))
+        m, s = divmod(total_seconds, 60)
+        status = "Early" if val < 0 else "Late"
         return f"{m}m {s}s {status}"
 
-    await interaction.response.send_message(
-        f"🔮 Prediction: **{target.display_name}** is going to be **{fmt(pred_res[0])}** for '**{actual_name}**'."
+    # 4. Final Response with Range
+    prediction_text = (
+        f"🔮 **AI Prediction** for '**{actual_name}**'\n"
+        f"👤 Target: **{target_name}**\n"
+        f"⏱️ **Expected**: {fmt(pred_res)}\n"
+        f"📉 **Range**: {fmt(lower_res)} — {fmt(upper_res)}"
     )
+
+    await interaction.response.send_message(prediction_text)
 
 #admin stuff
 @admin_menu.command(name="delete", description="Admin: Delete event records for members/role")
