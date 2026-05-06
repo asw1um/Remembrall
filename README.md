@@ -17,5 +17,7 @@ schedules do the same as events essentially injecting as event durign designated
 
 there are check in buttons at event create and 30 min re-dm after event starts plus event dm when start
 
+added set channel and auto resend dm buttons
+
 type in chat recognision needs work and thinking
 

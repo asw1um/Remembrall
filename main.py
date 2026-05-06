@@ -36,6 +36,7 @@ async def init_db():
     db = await get_db()
     await db.execute("""CREATE TABLE IF NOT EXISTS events (guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, time TEXT, lateness INTEGER, started INTEGER)""")
     await db.execute("""CREATE TABLE IF NOT EXISTS schedules(guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, day_of_week INTEGER, time_24h TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS guild_config(guild_id TEXT PRIMARY KEY, log_channel_id TEXT)""")
     
 
     cursor = await db.execute("PRAGMA table_info(events)")
@@ -75,6 +76,16 @@ async def query_db(query: str, args: tuple = (), one: bool = False):
             await asyncio.sleep(0.5)
             return await query_db(query, args, one)
         raise e
+
+#get channel
+async def get_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    row = await query_db(
+        "SELECT log_channel_id FROM guild_config WHERE guild_id = ?",
+        (str(guild.id),), one=True
+    )
+    if row and row[0]:
+        return guild.get_channel(int(row[0]))
+    return discord.utils.get(guild.text_channels, name="general")
 
 # autocomplete/options
 
@@ -294,7 +305,7 @@ class CheckInView(discord.ui.View):
  
         guild = bot.get_guild(int(guild_id))
         if guild:
-            chan = discord.utils.get(guild.text_channels, name="general")
+            chan = await get_log_channel(guild)
             if chan:
                 await chan.send(
                     f"🕒 **{interaction.user.display_name}** checked in! "
@@ -694,6 +705,19 @@ async def predict_lateness(interaction: Interaction, event_name: str, member: di
     await interaction.response.send_message(prediction_text)
 
 #admin stuff
+
+@admin_menu.command(name="set_channel", description="Admin: Set the channel for bot announcements")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def set_channel(interaction: Interaction, channel: discord.TextChannel):
+    await query_db(
+        "INSERT INTO guild_config (guild_id, log_channel_id) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = excluded.log_channel_id",
+        (str(interaction.guild.id), str(channel.id))
+    )
+    await interaction.response.send_message(
+        f"✅ Bot announcements will now go to {channel.mention}.", ephemeral=True
+    )
+
 @admin_menu.command(name="delete", description="Admin: Delete event records for members/role")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.autocomplete(event_name=event_autocomplete)
@@ -985,7 +1009,7 @@ async def auto_check():
             continue
 
         # Dedup: if any event for this user+name exists today, skip
-        exists = await query_db( "SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time LIKE ?"(uid, name, f"{today_str}%"), one=True )
+        exists = await query_db( "SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time LIKE ?",(uid, name, f"{today_str}%"), one=True )
         if exists:
             continue
 
@@ -1094,7 +1118,7 @@ async def on_voice_state_update(member, before, after):
 
             await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, rid) )
             
-            chan = discord.utils.get(member.guild.text_channels, name="general")
+            chan = await get_log_channel(member.guild)
             if chan:
                 m, s = abs(diff) // 60, abs(diff) % 60
                 if diff < 0:
@@ -1122,6 +1146,43 @@ async def on_ready():
 
     if not auto_check.is_running():
         auto_check.start()
+
+    #send new dm after restart    
+    now = datetime.now()
+    yesterday_str = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+
+    active = await query_db(
+        "SELECT rowid, user_id, name, time FROM events "
+        "WHERE lateness IS NULL AND dm_sent = 1 AND time >= ?",
+        (yesterday_str,)
+    )
+
+    for eid, uid, name, start_str in active:
+        sched = await query_db(
+            "SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?",
+            (str(uid), name), one=True
+        )
+        end_val = sched[0] if sched else None
+
+        if end_val:
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+                end_dt   = datetime.strptime(
+                    f"{start_dt.strftime('%Y-%m-%d')} {end_val}", "%Y-%m-%d %H:%M"
+                )
+                if now > end_dt:
+                    continue 
+            except ValueError:
+                pass
+
+        try:
+            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+            if user:
+                view = CheckInView(event_id=eid, end_time_str=end_val)
+                embed = discord.Embed(title="🔄 Bot Restarted — New Check-In Button",description=(f"The bot restarted. Here's a fresh button for **{name}**.\n\n" f"Check in before **{end_val or 'the deadline'}**."), color=0x5865F2 )
+                await user.send(embed=embed, view=view)
+        except Exception as e:
+            print(f"[on_ready] Failed to re-notify {uid}: {e}")
     print(f"Logged in as {bot.user}")
 
 # execution
