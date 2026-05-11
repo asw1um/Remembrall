@@ -77,6 +77,16 @@ async def query_db(query: str, args: tuple = (), one: bool = False):
             return await query_db(query, args, one)
         raise e
 
+async def minute_suggester(interaction: discord.Interaction, current: str):
+    # Common minute marks
+    options = ["00", "05", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55"]
+    
+    # Return suggestions that match what they've started typing
+    return [
+        app_commands.Choice(name=opt, value=int(opt))
+        for opt in options if current in opt
+    ][:25]
+
 #get channel
 async def get_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     row = await query_db(
@@ -328,11 +338,19 @@ event_menu = EventGroup()
 admin_menu = AdminGroup()
 
 # events
-
-
 @event_menu.command(name="create", description="Manual: Set a specific date/time for members")
+@app_commands.describe(month = "Select the month", checkin_opt = "Additional Check in options")
+@app_commands.autocomplete(minute = minute_suggester)
+@app_commands.choices(month=[
+        app_commands.Choice(name="Jan", value=1), app_commands.Choice(name="Feb", value=2),
+        app_commands.Choice(name="Mar", value=3), app_commands.Choice(name="Apr", value=4),
+        app_commands.Choice(name="May", value=5), app_commands.Choice(name="Jun", value=6),
+        app_commands.Choice(name="Jul", value=7), app_commands.Choice(name="Aug", value=8),
+        app_commands.Choice(name="Sep", value=9), app_commands.Choice(name="Oct", value=10),
+        app_commands.Choice(name="Nov", value=11), app_commands.Choice(name="Dec", value=12)
+    ],checkin_opt = [app_commands.Choice(name = "Button only (Primary)", value = 0), app_commands.Choice(name = "Additional VC", value = 1)], hour=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)])
 async def create(interaction: Interaction,
-                 name: str, year: int, month: int, day: int, time_24h: str,
+                 name: str, hour: int, minute: int, checkin_opt: int, year: int = None, month: int = None, day: int = None, 
                  member1: discord.Member = None, member2: discord.Member = None,
                  member3: discord.Member = None, member4: discord.Member = None,
                  member5: discord.Member = None, role: discord.Role = None):
@@ -344,15 +362,31 @@ async def create(interaction: Interaction,
         targets.add(interaction.user)
 
     try:
-        dt_str = f"{year}-{month:02d}-{day:02d} {time_24h}"
+        now = datetime.now()
+        y = year or now.year
+        m = month or now.month
+        d = day or now.day
+
+        try:
+            valid_date = datetime(year=y, month=m, day=d)
+        except ValueError:
+            return await interaction.response.send_message("**Invalid Date:** Please provide a real calendar date", ephemeral=True)
+
+        if not (0 <= minute < 60):
+            return await interaction.response.send_message(
+                "❌ Minutes must be between 00 and 59.", ephemeral=True
+            )
+
+        time_24h = f"{hour:02d}:{minute:02d}"
+        dt_str = f"{y}-{m:02d}-{d:02d} {time_24h}"
         guild_id = str(interaction.guild.id)
         names_list = []
 
         for member in targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) "
-                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)", 
-                (guild_id, str(member.id), member.name, name, dt_str)
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options) "
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?)", 
+                (guild_id, str(member.id), member.name, name, dt_str, checkin_opt)
             )
             
             last_row = await query_db("SELECT last_insert_rowid()", one=True)
@@ -373,8 +407,9 @@ async def create(interaction: Interaction,
 
         members_name_str = " ".join(names_list)
         unit = "member" if len(targets) == 1 else "members"
+        mode_txt = "VC or Button" if checkin_opt == 1 else "Button"
         await interaction.response.send_message(
-            f"📅 Scheduled **{name}** on {dt_str} for {len(targets)} {unit}:\n {members_name_str}"
+            f"📅 Scheduled **{name}** on {dt_str} for {len(targets)} {unit} with Check in method: "f"{mode_txt}:\n {members_name_str}"
         )
 
     except Exception as e:
@@ -384,8 +419,10 @@ async def create(interaction: Interaction,
         )
 
 @event_menu.command(name="create_quick", description="Quick: Set event for 'now' for members")
+@app_commands.describe(checkin_opt = "Additional Check in options")
+@app_commands.choices(checkin_opt = [app_commands.Choice(name = "Button only (Primary)", value = 0), app_commands.Choice(name = "Additional VC", value = 1)])
 async def create_quick(interaction: Interaction, 
-                       name: str, minutes: int,
+                       name: str, minutes: int,checkin_opt: int,
                        member1: discord.Member = None, member2: discord.Member = None,
                        member3: discord.Member = None, member4: discord.Member = None,
                        member5: discord.Member = None, role: discord.Role = None):
@@ -403,9 +440,9 @@ async def create_quick(interaction: Interaction,
 
     for member in targets:
         await query_db(
-            "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) "
-            "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)", 
-            (guild_id, str(member.id), member.name, name, dt_str)
+            "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options) "
+            "VALUES (?, ?, ?, ?, ?, NULL, 0, 0,?)", 
+            (guild_id, str(member.id), member.name, name, dt_str, checkin_opt)
         )
         
         last_row = await query_db("SELECT last_insert_rowid()", one=True)
@@ -434,8 +471,9 @@ async def create_quick(interaction: Interaction,
     if total_hours > 0:
         duration_str += f"{total_hours}h "
     duration_str += f"{remaining_mins}m"
+    mode_txt = "VC or Button" if checkin_opt == 1 else "Button"
     await interaction.response.send_message(
-        f"✅ Quick event '**{name}**' set for **{dt_str}** "f"({duration_str} from now) for {len(targets)} {unit}:\n"f"{members_name_str}"
+        f"✅ Quick event '**{name}**' set for **{dt_str}** "f"({duration_str} from now) for {len(targets)} {unit} with Check in method: "f"{mode_txt}\n"f"{members_name_str}"
     )
 
 
@@ -547,36 +585,35 @@ async def clear(interaction: Interaction):
         await interaction.edit_original_response(content="❌ Clear cancelled.", view=None)
 
 @event_menu.command(name="add_schedule", description="Set a recurring weekly event with an end time")
-async def add_schedule(interaction: Interaction, name: str, day: str, start_time: str, end_time: str):
-    day_map = {
-        "mon": 0, "monday": 0,
-        "tue": 1, "tuesday": 1,
-        "wed": 2, "wednesday": 2,
-        "thu": 3, "thursday": 3,
-        "fri": 4, "friday": 4,
-        "sat": 5, "saturday": 5,
-        "sun": 6, "sunday": 6
-    }
-    day_clean = day.lower().strip()
-    day_index = day_map.get(day_clean) or day_map.get(day_clean[:3])
+@app_commands.describe(checkin_opt = "Additional Check in options")
+@app_commands.autocomplete(end_m = minute_suggester, start_m = minute_suggester)
+@app_commands.choices(day=[
+        app_commands.Choice(name="Monday", value=0),
+        app_commands.Choice(name="Tuesday", value=1),
+        app_commands.Choice(name="Wednesday", value=2),
+        app_commands.Choice(name="Thursday", value=3),
+        app_commands.Choice(name="Friday", value=4),
+        app_commands.Choice(name="Saturday", value=5),
+        app_commands.Choice(name="Sunday", value=6)
+    ],checkin_opt = [app_commands.Choice(name = "Button only (Primary)", value = 0), app_commands.Choice(name = "Additional VC", value = 1)], start_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)]
+    ,end_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)] )
+async def add_schedule(interaction: Interaction, name: str, day: int, start_h: int, start_m: int, end_h: int, end_m: int, checkin_opt: int):
+    start_time = f"{start_h:02d}:{start_m:02d}"
+    end_time = f"{end_h:02d}:{end_m:02d}"
 
-    if day_index is None:
-        return await interaction.response.send_message("❌ Invalid day. Please use 'Monday', 'Mon', etc.", ephemeral=True)
-    
-    try:
-        datetime.strptime(start_time, "%H:%M")
-        datetime.strptime(end_time, "%H:%M")
-    except ValueError:
-        return await interaction.response.send_message("❌ Invalid time format. Use HH:MM (e.g., 14:30).", ephemeral=True)
+    if not (0 <= start_m < 60) or not (0 <= end_m < 60):
+            return await interaction.response.send_message(
+                "❌ Minutes must be between 00 and 59.", ephemeral=True
+            )
 
     await query_db(
-        "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day_index, start_time, end_time)
+        "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options) VALUES (?, ?, ?, ?, ?, ?, ?,?)",
+        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day, start_time, end_time, checkin_opt)
     )
     
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     await interaction.response.send_message(
-        f"🗓️ Recurring event **{name}** set for every **{days_list[day_index]}** from **{start_time}** to **{end_time}**."
+        f"🗓️ Recurring event **{name}** set for every **{days_list[day]}** from **{start_time}** to **{end_time}**."
     )
 
 @event_menu.command(name="delete_schedule", description="Delete a recurring schedule")
@@ -798,7 +835,16 @@ async def admin_stop(interaction: discord.Interaction, event_name: str,
 
 @admin_menu.command(name="add_record", description="Admin: Add a finished event record for members/role")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def admin_add_record(interaction: discord.Interaction, event_name: str, lateness_minutes: int, date_str: str = None,
+@app_commands.autocomplete(minute = minute_suggester)
+@app_commands.choices(month=[
+        app_commands.Choice(name="Jan", value=1), app_commands.Choice(name="Feb", value=2),
+        app_commands.Choice(name="Mar", value=3), app_commands.Choice(name="Apr", value=4),
+        app_commands.Choice(name="May", value=5), app_commands.Choice(name="Jun", value=6),
+        app_commands.Choice(name="Jul", value=7), app_commands.Choice(name="Aug", value=8),
+        app_commands.Choice(name="Sep", value=9), app_commands.Choice(name="Oct", value=10),
+        app_commands.Choice(name="Nov", value=11), app_commands.Choice(name="Dec", value=12)
+    ],hour=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)])
+async def admin_add_record(interaction: discord.Interaction, event_name: str, hour: int, minute: int, lateness_minutes: int,  year: int = None, month: int = None, day: int =None,
                            member1: discord.Member = None, member2: discord.Member = None,
                             member3: discord.Member = None, member4: discord.Member = None,
                             member5: discord.Member = None, role: discord.Role = None):
@@ -810,9 +856,22 @@ async def admin_add_record(interaction: discord.Interaction, event_name: str, la
     if not targets:
         return await interaction.response.send_message("❌ You must specify at least one member or a role.", ephemeral=True)
 
-    if not date_str: 
-        date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now()
+    y = year or now.year
+    m = month or now.month
+    d = day or now.day
+    try:
+        valid_date = datetime(year=y, month=m, day=d)
+    except ValueError:
+        return await interaction.response.send_message("**Invalid Date:** Please provide a real calendar date", ephemeral=True)
+
+    if not (0 <= minute < 60):
+        return await interaction.response.send_message(
+            "❌ Minutes must be between 00 and 59.", ephemeral=True
+        )
     
+    time_24h = f"{hour:02d}:{minute:02d}"
+    date_str = f"{y}-{m:02d}-{d:02d} {time_24h}"
     guild_id = str(interaction.guild.id)
     lateness_seconds = lateness_minutes * 60
     mentions_list = []
@@ -828,26 +887,31 @@ async def admin_add_record(interaction: discord.Interaction, event_name: str, la
 
 @admin_menu.command(name="add_user_schedule", description="Admin: Add schedule for members/role")
 @app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(checkin_opt = "Additional Check in options")
+@app_commands.autocomplete(end_m=minute_suggester, start_m=minute_suggester)
+@app_commands.choices(
+    day=[
+        app_commands.Choice(name="Monday", value=0),
+        app_commands.Choice(name="Tuesday", value=1),
+        app_commands.Choice(name="Wednesday", value=2),
+        app_commands.Choice(name="Thursday", value=3),
+        app_commands.Choice(name="Friday", value=4),
+        app_commands.Choice(name="Saturday", value=5),
+        app_commands.Choice(name="Sunday", value=6)
+    ],checkin_opt = [app_commands.Choice(name = "Button only (Primary)", value = 0), app_commands.Choice(name = "Additional VC", value = 1)],
+    start_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)],
+    end_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)])
 async def admin_add_schedule(interaction: Interaction, 
-                             name: str, day: str, time_24h: str,
+                             name: str, day: str, checkin_opt: int,start_h: int, start_m: int, end_h: int, end_m: int,
                              member1: discord.Member = None, member2: discord.Member = None,
                              member3: discord.Member = None, member4: discord.Member = None,
                              member5: discord.Member = None, role: discord.Role = None):
     
-    day_map = {
-        "monday": 0, "mon": 0,
-        "tuesday": 1, "tue": 1, "tues": 1,
-        "wednesday": 2, "wed": 2,
-        "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
-        "friday": 4, "fri": 4,
-        "saturday": 5, "sat": 5,
-        "sunday": 6, "sun": 6
-    }
-    day_input = day.lower().strip()
-    if day_input not in day_map: 
-        return await interaction.response.send_message("❌ Invalid day.", ephemeral=True)
+    if not (0 <= start_m < 60) or not (0 <= end_m < 60):
+        return await interaction.response.send_message("❌ Minutes must be 0-59.", ephemeral=True)
     
-    day_index = day_map[day_input]
+    start_time = f"{start_h:02d}:{start_m:02d}"
+    end_time = f"{end_h:02d}:{end_m:02d}"
     gid = str(interaction.guild.id)
 
     targets = {m for m in [member1, member2, member3, member4, member5] if m}
@@ -859,11 +923,13 @@ async def admin_add_schedule(interaction: Interaction,
 
     mentions = []
     for member in targets:
-        await query_db( "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h) VALUES (?, ?, ?, ?, ?, ?)", (gid, str(member.id), member.name, name, day_index, time_24h) )
+        await query_db( "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options) VALUES (?, ?, ?, ?, ?, ?, ?,?)", (gid, str(member.id), member.name, name, day, start_time, end_time, checkin_opt) )
         mentions.append(member.mention)
 
+    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
     await interaction.response.send_message(
-        f"🗓️ Admin set schedule '**{name}**' ({day.capitalize()} @ {time_24h}) for:\n{', '.join(mentions)}"
+        f"🗓️ Admin set schedule '**{name}**' ({days_list[day]} @ {start_time} - {end_time}) for:\n{', '.join(mentions)}"
     )
 
 @admin_menu.command(name="delete_user_schedule", description="Admin: Delete schedules for members/role")
@@ -994,9 +1060,9 @@ async def auto_check():
     yesterday_str = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
 
     # fetches all today's schedules-2h
-    all_today = await query_db( "SELECT guild_id, user_id, username, name, end_time_24h, time_24h " "FROM schedules WHERE day_of_week = ?", (day_idx,))
+    all_today = await query_db( "SELECT guild_id, user_id, username, name, end_time_24h, time_24h, checkin_options " "FROM schedules WHERE day_of_week = ?", (day_idx,))
 
-    for gid, uid, uname, name, end_t, start_t in all_today:
+    for gid, uid, uname, name, end_t, start_t, checkin_opt in all_today:
         try:
             start_dt = datetime.strptime(f"{today_str} {start_t}", "%Y-%m-%d %H:%M")
         except ValueError:
@@ -1014,7 +1080,7 @@ async def auto_check():
             continue
 
         actual_start_str = start_dt.strftime("%Y-%m-%d %H:%M")
-        await query_db( "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, actual_start_str))
+        await query_db( "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, actual_start_str, checkin_opt))
 
     #old notify
     to_notify = await query_db( "SELECT rowid, user_id, name, time FROM events ""WHERE dm_sent = 0 AND lateness IS NULL AND time >= ?",(yesterday_str,))
@@ -1045,8 +1111,9 @@ async def auto_check():
 
     #30 min later dm
     if now.second < 30:
+        thirty_one_ago = (now - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M")
         thirty_mins_ago = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
-        late_30 = await query_db("SELECT user_id, name FROM events WHERE time = ? AND lateness IS NULL",(thirty_mins_ago,) )
+        late_30 = await query_db("SELECT user_id, name FROM events WHERE time <= ? AND time > ? AND lateness IS NULL AND dm_sent = 1",(thirty_mins_ago,thirty_one_ago) )
         for uid, name in late_30:
             try:
                 user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
@@ -1095,7 +1162,7 @@ async def on_voice_state_update(member, before, after):
     if before.channel is None and after.channel is not None:
         gid, uid = str(member.guild.id), str(member.id)
 
-        active = await query_db( "SELECT name, time, rowid FROM events ""WHERE user_id = ? AND guild_id = ? AND lateness IS NULL " "ORDER BY time ASC LIMIT 1",  (uid, gid) )
+        active = await query_db( "SELECT name, time, rowid FROM events ""WHERE user_id = ? AND guild_id = ? AND lateness IS NULL AND checkin_options = ? " "ORDER BY time ASC LIMIT 1",  (uid, gid,1) )
         
         if not active:
             return
@@ -1175,14 +1242,15 @@ async def on_ready():
             except ValueError:
                 pass
 
-        try:
-            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
-            if user:
-                view = CheckInView(event_id=eid, end_time_str=end_val)
-                embed = discord.Embed(title="🔄 Bot Restarted — New Check-In Button",description=(f"The bot restarted. Here's a fresh button for **{name}**.\n\n" f"Check in before **{end_val or 'the deadline'}**."), color=0x5865F2 )
-                await user.send(embed=embed, view=view)
-        except Exception as e:
-            print(f"[on_ready] Failed to re-notify {uid}: {e}")
+        #renotify 
+        # try:
+        #     user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+        #     if user:
+        #         view = CheckInView(event_id=eid, end_time_str=end_val)
+        #         embed = discord.Embed(title="🔄 Bot Restarted — New Check-In Button",description=(f"The bot restarted. Here's a fresh button for **{name}**.\n\n" f"Check in before **{end_val or 'the deadline'}**."), color=0x5865F2 )
+        #         await user.send(embed=embed, view=view)
+        # except Exception as e:
+        #     print(f"[on_ready] Failed to re-notify {uid}: {e}")
     print(f"Logged in as {bot.user}")
 
 # execution
