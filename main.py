@@ -902,7 +902,7 @@ async def admin_add_record(interaction: discord.Interaction, event_name: str, ho
     start_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)],
     end_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)])
 async def admin_add_schedule(interaction: Interaction, 
-                             name: str, day: str, checkin_opt: int,start_h: int, start_m: int, end_h: int, end_m: int,
+                             name: str, day: int, checkin_opt: int,start_h: int, start_m: int, end_h: int, end_m: int,
                              member1: discord.Member = None, member2: discord.Member = None,
                              member3: discord.Member = None, member4: discord.Member = None,
                              member5: discord.Member = None, role: discord.Role = None):
@@ -1111,6 +1111,7 @@ async def auto_check():
 
     #30 min later dm
     if now.second < 30:
+        #late_nag_time = await query_db("SELECT rowid, user_id, name, time, reminder_offset, notes FROM events " "WHERE lateness IS NULL AND dm_sent = 1 AND reminder_sent = 0")
         thirty_one_ago = (now - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M")
         thirty_mins_ago = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
         late_30 = await query_db("SELECT user_id, name FROM events WHERE time <= ? AND time > ? AND lateness IS NULL AND dm_sent = 1",(thirty_mins_ago,thirty_one_ago) )
