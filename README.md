@@ -1,4 +1,4 @@
-﻿#  Remembrall | V3
+﻿#  Remembrall | 
 ### *Machine Learning Powered Prediction & Event tracking/Analysis*
 
 [![Status](https://img.shields.io/badge/Version-3.0_Stable-blueviolet.svg)](#)
@@ -52,8 +52,7 @@ Built for scale. No more one-by-one commands.
 | `/event create` | Schedule a custom event with a specific date/time for multiple members or roles. |
 | `/event create_quick` | Instantly create an event starting in *X minutes* for rapid tracking. |
 | `/event stop` | Stops an active event and logs lateness/earliness. Supports bulk targeting. |
-| `/event list` | View your personal event history and current active events. |
-| `/event list_all` | Displays all events across the server in a structured board view. |
+| `/event list` | View event history and current active events with filtering added. |
 | `/event delete` | Delete a specific event record (with confirmation prompt). |
 | `/event clear_all` | Wipe all your event history in the server (multi-step verification). |
 
@@ -97,8 +96,7 @@ Built for scale. No more one-by-one commands.
 | `/admin add_record` | Manually insert a completed event with lateness data. |
 | `/admin add_user_schedule` | Assign recurring schedules to members/roles. |
 | `/admin delete_user_schedule` | Remove schedules for members/roles or by ID. |
-| `/admin export` | Export all server event data to JSON. |
-| `/admin import` | Import event data from JSON. |
+| `/admin backup` | backs up data to a backup folder and if not creates one |
 
 </details>
 
@@ -119,7 +117,7 @@ Built for scale. No more one-by-one commands.
 
 ##  Development Roadmap
 *   **[BETA]** Testing the `/predict` command stability across high-volume servers.
-*   **[RESEARCH]** Improving **Type-in-Chat Recognition** to detect "onw" or "brb" messages automatically.
+*   **[RESEARCH]** Improving QOL features suggested by the community (scrapping the text recognition for now)
 
 ---
 
@@ -128,3 +126,14 @@ Built for scale. No more one-by-one commands.
 1. **Clone the Repo:**
    ```bash
    git clone [https://github.com/username/lateness-bot-v3.git](https://github.com/username/lateness-bot-v3.git)
+
+## Updates
+<details>
+<summary><strong> Current Version Updates</strong></summary>
+
+    - **decluttering for cleaner look** time and members are decluttered
+    - **added filtering ** for listing, clearing
+    - **custom naggin time and notes** notes are not available for create_quick
+    - **auto deletion of dms while leaving record**
+    - **updated some admin functions to be more QOL**
+    - **persistent buttons** useable even after bot restarts
