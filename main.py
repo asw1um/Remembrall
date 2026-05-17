@@ -633,7 +633,6 @@ class QuickMemberPicker(discord.ui.View):
 
             mentions.append(member.mention)
 
-        # 5. Send the final PUBLIC confirmation
         h, m = self.minutes // 60, self.minutes % 60
         dur = f"{h}h {m}m" if h > 0 else f"{m}m"
         
@@ -839,38 +838,6 @@ async def clear_self(interaction: Interaction,  timeframe: str = "all",date_sear
 
     await query_db(query, tuple(params))
     await interaction.edit_original_response(content=f"✅ Done! Your {label} have been successfully cleared.", view=None )
-
-# @event_menu.command(name="add_schedule", description="Set a recurring weekly event with an end time")
-# @app_commands.describe(checkin_opt = "Additional Check in options")
-# @app_commands.autocomplete(end_m = minute_suggester, start_m = minute_suggester)
-# @app_commands.choices(day=[
-#         app_commands.Choice(name="Monday", value=0),
-#         app_commands.Choice(name="Tuesday", value=1),
-#         app_commands.Choice(name="Wednesday", value=2),
-#         app_commands.Choice(name="Thursday", value=3),
-#         app_commands.Choice(name="Friday", value=4),
-#         app_commands.Choice(name="Saturday", value=5),
-#         app_commands.Choice(name="Sunday", value=6)
-#     ],checkin_opt = [app_commands.Choice(name = "Button only (Primary)", value = 0), app_commands.Choice(name = "Additional VC", value = 1)], start_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)]
-#     ,end_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)] )
-# async def add_schedule(interaction: Interaction, name: str, day: int, start_h: int, start_m: int, end_h: int, end_m: int, checkin_opt: int):
-#     start_time = f"{start_h:02d}:{start_m:02d}"
-#     end_time = f"{end_h:02d}:{end_m:02d}"
-
-#     if not (0 <= start_m < 60) or not (0 <= end_m < 60):
-#             return await interaction.response.send_message(
-#                 "❌ Minutes must be between 00 and 59.", ephemeral=True
-#             )
-
-#     await query_db(
-#         "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options) VALUES (?, ?, ?, ?, ?, ?, ?,?)",
-#         (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day, start_time, end_time, checkin_opt)
-#     )
-    
-#     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-#     await interaction.response.send_message(
-#         f"🗓️ Recurring event **{name}** set for every **{days_list[day]}** from **{start_time}** to **{end_time}**."
-#     )
 
 @event_menu.command(name="add_schedule", description="Set a recurring weekly event")
 @app_commands.describe( start_time="HH:MM (e.g. 14:00)",end_time="HH:MM (e.g. 16:00)",checkin_opt="How members should check in",notes="Extra details (Max 100)",reminder_offset="Minutes late before warning")
@@ -1139,13 +1106,6 @@ async def admin_delete(interaction: discord.Interaction, event_name: str):
     )
     view.message = await interaction.original_response()
 
-# @admin_menu.command(name="clear", description="Admin: Clear ALL user data")
-# @app_commands.checks.has_permissions(manage_guild=True)
-# async def admin_clear(interaction: discord.Interaction):
-#     view = AdminActionPicker("clear", None, "ALL DATA", str(interaction.guild.id))
-#     await interaction.response.send_message("❗ **DANGER**: Select members/roles to **WIPE ENTIRE HISTORY**.", view=view, ephemeral=True)
-#     view.message = await interaction.original_response()
-
 @admin_menu.command(name="clear", description="Admin: Wipe event or history data")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.choices(scope=[
@@ -1183,19 +1143,6 @@ async def admin_clear(interaction: discord.Interaction, scope: str, days_old: in
         )
         view.message = await interaction.original_response()
 
-# @admin_menu.command(name="stop", description="Admin: Stop an event for anyone")
-# @app_commands.checks.has_permissions(manage_guild=True)
-# @app_commands.autocomplete(event_name=event_autocomplete)
-# async def admin_stop(interaction: discord.Interaction, event_name: str):
-#     actual_name = event_name
-#     if event_name.isdigit():
-#         res = await query_db("SELECT name FROM events WHERE rowid = ?", (int(event_name),), one=True)
-#         if res: actual_name = res[0]
-
-#     view = AdminActionPicker("stop", event_name, actual_name, str(interaction.guild.id))
-#     await interaction.response.send_message(f" **Stop Action**: Who should have their session of '**{actual_name}**' ended?", view=view, ephemeral=True)
-#     view.message = await interaction.original_response()
-
 @admin_menu.command(name="stop", description="Admin: Stop an active event session")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.autocomplete(event_name=event_autocomplete)
@@ -1229,13 +1176,13 @@ async def admin_stop(interaction: discord.Interaction, event_name: str, scope: s
     view.message = await interaction.original_response()
 
 class RecordMemberPicker(discord.ui.View):
-    def __init__(self, event_name, dt_str, lateness_seconds, gid):
+    def __init__(self, event_name, dt_str, lateness_seconds, gid, admin_user: discord.Member):
         super().__init__(timeout=60)
         self.event_name = event_name
         self.dt_str = dt_str
         self.lateness_seconds = lateness_seconds
         self.gid = gid
-        self.targets = set()
+        self.targets = {admin_user}
         self.message = None
 
     @discord.ui.select(cls=discord.ui.MentionableSelect, placeholder="Select members/roles for this record...", min_values=1, max_values=25)
@@ -1278,58 +1225,6 @@ class RecordMemberPicker(discord.ui.View):
             try: await self.message.edit(content="❌ **Record setup timed out.**", view=self)
             except: pass
 
-# @admin_menu.command(name="add_record", description="Admin: Add a finished event record for members/role")
-# @app_commands.checks.has_permissions(manage_guild=True)
-# @app_commands.autocomplete(minute = minute_suggester)
-# @app_commands.choices(month=[
-#         app_commands.Choice(name="Jan", value=1), app_commands.Choice(name="Feb", value=2),
-#         app_commands.Choice(name="Mar", value=3), app_commands.Choice(name="Apr", value=4),
-#         app_commands.Choice(name="May", value=5), app_commands.Choice(name="Jun", value=6),
-#         app_commands.Choice(name="Jul", value=7), app_commands.Choice(name="Aug", value=8),
-#         app_commands.Choice(name="Sep", value=9), app_commands.Choice(name="Oct", value=10),
-#         app_commands.Choice(name="Nov", value=11), app_commands.Choice(name="Dec", value=12)
-#     ],hour=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)])
-# async def admin_add_record(interaction: discord.Interaction, event_name: str, hour: int, minute: int, lateness_minutes: int,  year: int = None, month: int = None, day: int =None,
-#                            member1: discord.Member = None, member2: discord.Member = None,
-#                             member3: discord.Member = None, member4: discord.Member = None,
-#                             member5: discord.Member = None, role: discord.Role = None):
-    
-#     targets = {m for m in [member1, member2, member3, member4, member5] if m}
-#     if role:
-#         targets.update(m for m in role.members if not m.bot)
-        
-#     if not targets:
-#         return await interaction.response.send_message("❌ You must specify at least one member or a role.", ephemeral=True)
-
-#     now = datetime.now()
-#     y = year or now.year
-#     m = month or now.month
-#     d = day or now.day
-#     try:
-#         valid_date = datetime(year=y, month=m, day=d)
-#     except ValueError:
-#         return await interaction.response.send_message("**Invalid Date:** Please provide a real calendar date", ephemeral=True)
-
-#     if not (0 <= minute < 60):
-#         return await interaction.response.send_message(
-#             "❌ Minutes must be between 00 and 59.", ephemeral=True
-#         )
-    
-#     time_24h = f"{hour:02d}:{minute:02d}"
-#     date_str = f"{y}-{m:02d}-{d:02d} {time_24h}"
-#     guild_id = str(interaction.guild.id)
-#     lateness_seconds = lateness_minutes * 60
-#     mentions_list = []
-
-#     for member in targets:
-#         await query_db( "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started) VALUES (?, ?, ?, ?, ?, ?, 0)",  (guild_id, str(member.id), member.name, event_name, date_str, lateness_seconds))
-#         mentions_list.append(member.mention)
-
-#     unit = "member" if len(targets) == 1 else "members"
-#     mentions_str = ", ".join(mentions_list)
-    
-#     await interaction.response.send_message( f"✅ Added record for **{len(targets)}** {unit} under event '**{event_name}**' ({lateness_minutes}m late).\n" f"**Targets:** {mentions_str}")
-
 @admin_menu.command(name="add_record", description="Admin: Log a finished event record")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(event_name="Name of the event (e.g. Weekly Meeting)", time="HH:MM (e.g. 14:00)",lateness_minutes="How many minutes late? (Use 0 for on-time)",month="Optional: 1-12",day="Optional: 1-31")
@@ -1357,7 +1252,7 @@ async def admin_add_record(interaction: discord.Interaction,  event_name: str,  
     lateness_seconds = lateness_minutes * 60
     gid = str(interaction.guild.id)
 
-    view = RecordMemberPicker(event_name, dt_str, lateness_seconds, gid)
+    view = RecordMemberPicker(event_name, dt_str, lateness_seconds, gid, admin_user = interaction.user)
     
     await interaction.response.send_message(
         f"📝 **Creating record for '{event_name}'** on **{dt_str}**\n"
@@ -1458,61 +1353,22 @@ async def admin_add_schedule(interaction: Interaction, name: str,  day: int,  st
         ephemeral=True
     )
     view.message = await interaction.original_response()
-# @admin_menu.command(name="add_user_schedule", description="Admin: Add schedule for members/role")
-# @app_commands.checks.has_permissions(manage_guild=True)
-# @app_commands.describe(checkin_opt = "Additional Check in options")
-# @app_commands.autocomplete(end_m=minute_suggester, start_m=minute_suggester)
-# @app_commands.choices(
-#     day=[
-#         app_commands.Choice(name="Monday", value=0),
-#         app_commands.Choice(name="Tuesday", value=1),
-#         app_commands.Choice(name="Wednesday", value=2),
-#         app_commands.Choice(name="Thursday", value=3),
-#         app_commands.Choice(name="Friday", value=4),
-#         app_commands.Choice(name="Saturday", value=5),
-#         app_commands.Choice(name="Sunday", value=6)
-#     ],checkin_opt = [app_commands.Choice(name = "Button only (Primary)", value = 0), app_commands.Choice(name = "Additional VC", value = 1)],
-#     start_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)],
-#     end_h=[app_commands.Choice(name=f"{h:02d}", value=h) for h in range(24)])
-# async def admin_add_schedule(interaction: Interaction, 
-#                              name: str, day: int, checkin_opt: int,start_h: int, start_m: int, end_h: int, end_m: int,
-#                              member1: discord.Member = None, member2: discord.Member = None,
-#                              member3: discord.Member = None, member4: discord.Member = None,
-#                              member5: discord.Member = None, role: discord.Role = None):
-    
-#     if not (0 <= start_m < 60) or not (0 <= end_m < 60):
-#         return await interaction.response.send_message("❌ Minutes must be 0-59.", ephemeral=True)
-    
-#     start_time = f"{start_h:02d}:{start_m:02d}"
-#     end_time = f"{end_h:02d}:{end_m:02d}"
-#     gid = str(interaction.guild.id)
-
-#     targets = {m for m in [member1, member2, member3, member4, member5] if m}
-#     if role:
-#         targets.update(m for m in role.members if not m.bot)
-        
-#     if not targets:
-#         return await interaction.response.send_message("❌ Specify who to add the schedule for!", ephemeral=True)
-
-#     mentions = []
-#     for member in targets:
-#         await query_db( "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options) VALUES (?, ?, ?, ?, ?, ?, ?,?)", (gid, str(member.id), member.name, name, day, start_time, end_time, checkin_opt) )
-#         mentions.append(member.mention)
-
-#     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-
-#     await interaction.response.send_message(
-#         f"🗓️ Admin set schedule '**{name}**' ({days_list[day]} @ {start_time} - {end_time}) for:\n{', '.join(mentions)}"
-#     )
 class AdminScheduleDeletePicker(discord.ui.View):
-    def __init__(self, name: str, gid: str):
+    def __init__(self, name: str, gid: str, weekday_filter: Optional[int] = None, date_search: Optional[str] = None):
         super().__init__(timeout=60)
         self.name = name
         self.gid = gid
+        self.weekday_filter = weekday_filter 
+        self.date_search = date_search       
         self.targets = set()
         self.message = None
 
-    @discord.ui.select(cls=discord.ui.MentionableSelect,  placeholder="Select targets to remove...", min_values=1,  max_values=25 )
+    @discord.ui.select(
+        cls=discord.ui.MentionableSelect, 
+        placeholder="Select members or roles to remove from this schedule...", 
+        min_values=1, 
+        max_values=25
+    )
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.MentionableSelect):
         self.targets = set()
         for entity in select.values:
@@ -1522,7 +1378,7 @@ class AdminScheduleDeletePicker(discord.ui.View):
                 self.targets.update(m for m in entity.members if not m.bot)
         await interaction.response.defer()
 
-    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.red) # Changed to red for warnings
+    @discord.ui.button(label="Confirm Bulk Deletion", style=discord.ButtonStyle.red)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.targets:
             return await interaction.followup.send("❌ You must select at least one member/role.", ephemeral=True)
@@ -1530,20 +1386,33 @@ class AdminScheduleDeletePicker(discord.ui.View):
         for item in self.children:
             item.disabled = True
         
-        await interaction.response.edit_message(content="⏳ **Removing schedule records...**", view=self)
+        await interaction.response.edit_message(content="⏳ **Processing filtered database purge...**", view=self)
 
         target_ids = [str(member.id) for member in self.targets]
         placeholders = ",".join(["?"] * len(target_ids))
 
-        rows = await query_db( f"SELECT name FROM schedules WHERE name = ? AND guild_id = ? AND user_id IN ({placeholders})", (self.name, self.gid, *target_ids) )
+        query_args = [self.name, self.gid, *target_ids]
+        filter_conditions = ""
+
+        if self.weekday_filter is not None:
+            filter_conditions += " AND day_of_week = ?"
+            query_args.append(self.weekday_filter)
+
+        if self.date_search:
+            filter_conditions += " AND time_24h LIKE ?"
+            query_args.append(f"{self.date_search.strip()}%")
+
+        select_sql = f"SELECT name FROM schedules WHERE name = ? AND guild_id = ? AND user_id IN ({placeholders}){filter_conditions}"
+        rows = await query_db(select_sql, tuple(query_args))
 
         if not rows:
             return await interaction.followup.send(
-                f"❌ No active schedules named '{self.name}' found for the selected targets.", 
+                f"❌ No matching schedule templates found for the selected targets under these filters.", 
                 ephemeral=True
             )
 
-        await query_db(f"DELETE FROM schedules WHERE name = ? AND guild_id = ? AND user_id IN ({placeholders})",  (self.name, self.gid, *target_ids))
+        delete_sql = f"DELETE FROM schedules WHERE name = ? AND guild_id = ? AND user_id IN ({placeholders}){filter_conditions}"
+        await query_db(delete_sql, tuple(query_args))
 
         mentions = [member.mention for member in self.targets]
         await interaction.followup.send(
@@ -1555,118 +1424,95 @@ class AdminScheduleDeletePicker(discord.ui.View):
         )
 
     async def on_timeout(self):
-        for item in self.children: 
-            item.disabled = True
+        for item in self.children: item.disabled = True
         if self.message:
-            try: 
-                await self.message.edit(content="❌ **Admin Selection Timed Out.**", view=self)
-            except: 
-                pass
+            try: await self.message.edit(content="❌ **Admin Selection Timed Out.**", view=self)
+            except: pass
 
 async def schedule_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    gid = str(interaction.guild_id) if interaction.guild_id else ""
+    try:
+        gid = str(interaction.guild_id) if interaction.guild_id else ""
+        days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-    rows = await query_db(
-        "SELECT DISTINCT name FROM schedules WHERE guild_id = ? AND name LIKE ?", 
-        (gid, f"%{current}%")
-    )
-    
-    choices = []
-    for row in rows:
-        name_val = row.get("name") if isinstance(row, dict) else row[0]
-        choices.append(app_commands.Choice(name=name_val, value=name_val))
+        rows = await query_db("SELECT name, day_of_week, time_24h, username, user_id FROM schedules WHERE guild_id = ?", (gid,))
+        if not rows:
+            return []
 
-    return choices[:25]
+        choices = []
+        seen_combos = set()
+        current_lower = current.lower()
 
-@admin_menu.command(name="delete_user_schedule", description="Admin: Delete schedules for members/role")
+        for row in rows:
+            if isinstance(row, dict):
+                name_val = row.get("name")
+                day_idx = row.get("day_of_week")
+                time_str = row.get("time_24h")
+                uname_val = row.get("username")
+                uid_val = row.get("user_id")
+            elif hasattr(row, "keys"):
+                name_val = row["name"]
+                day_idx = row["day_of_week"]
+                time_str = row["time_24h"]
+                uname_val = row["username"]
+                uid_val = row["user_id"]
+            else:
+                name_val, day_idx, time_str, uname_val, uid_val = row[0], row[1], row[2], row[3], row[4]
+
+            if name_val is None:
+                continue
+
+            server_display_name = None
+            if interaction.guild and uid_val:
+                member = interaction.guild.get_member(int(uid_val))
+                if member:
+                    server_display_name = member.display_name
+
+            user_tag = server_display_name or uname_val or f"ID: {uid_val}"
+            day_name = days_list[int(day_idx)]
+            time_display = f" @ {time_str}" if time_str else ""
+            
+            display_name = f"{name_val} ({day_name}{time_display}) - {user_tag}"[:100]
+            packed_value = f"{name_val}|||{day_idx}"[:100]
+
+            search_haystack = f"{name_val} {day_name} {user_tag}".lower()
+            if current_lower and current_lower not in search_haystack:
+                continue
+
+            search_combo_id = f"{name_val}-{day_idx}-{time_str}-{uid_val}"
+            if search_combo_id not in seen_combos:
+                seen_combos.add(search_combo_id)
+                choices.append(app_commands.Choice(name=display_name, value=packed_value))
+
+            if len(choices) >= 25:
+                break
+                
+        return choices
+
+    except Exception as e:
+        print(f"💥 AUTOCOMPLETE CRASH LOG: {e}")
+        return []
+
+# ⚙️ THE CLEANED-UP COMMAND
+@admin_menu.command(name="delete_user_schedule", description="Admin: Delete schedules via smart search box")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.autocomplete(name=schedule_autocomplete)
-@app_commands.choices(day=[
-    app_commands.Choice(name="Monday", value=0),
-    app_commands.Choice(name="Tuesday", value=1),
-    app_commands.Choice(name="Wednesday", value=2),
-    app_commands.Choice(name="Thursday", value=3),
-    app_commands.Choice(name="Friday", value=4),
-    app_commands.Choice(name="Saturday", value=5),
-    app_commands.Choice(name="Sunday", value=6),])
-async def admin_delete_user_schedule(interaction: Interaction, name: str, day: Optional[app_commands.Choice[int]] = None):
+async def admin_delete_user_schedule(interaction: Interaction, name: str):
     gid = str(interaction.guild.id)
-    day_val = day.value if day else None
+    day_val = None
+    target_name = name
 
-    # 🆔 Direct ID string execution bypass
-    if name.isdigit():
-        row = await query_db("SELECT name, username, day_of_week, time_24h FROM schedules WHERE rowid = ? AND guild_id = ?", (int(name), gid), one=True)
-        if not row:
-            return await interaction.response.send_message("❌ Schedule not found.", ephemeral=True)
+    if "|||" in name:
+        parts = name.split("|||")
+        target_name = parts[0]
+        day_val = int(parts[1])
 
-        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        info = f"**{row[0]}** for **{row[1]}** ({days[row[2]]} @ {row[3]})"
-        
-        view = DeleteConfirm()
-        await interaction.response.send_message(f"⚠️ **ADMIN**: Delete this unique schedule template?\n> {info}", view=view, ephemeral=True)
-        await view.wait()
-        
-        if view.value:
-            await query_db("DELETE FROM schedules WHERE rowid = ?", (int(name),))
-            await interaction.edit_original_response(content=f"✅ Deleted: {info}", view=None)
-        return
-    
-    picker_view = AdminScheduleDeletePicker(name=name, gid=gid, day_filter=day_val)
+    picker_view = AdminScheduleDeletePicker(name=target_name, gid=gid, weekday_filter=day_val)
     
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     day_string = days_list[day_val] if day_val is not None else "All Days"
 
-    await interaction.response.send_message(
-        f"⚙️ **Admin Control [Day Filter: {day_string}]**\nSelect the targeted members or roles below to strip entries from:",
-        view=picker_view,
-        ephemeral=True
-    )
+    await interaction.response.send_message(f"⚙️ **Admin Control [Filter Locked: {target_name} ({day_string})]**\nSelect target members/roles to clear entries:",view=picker_view, ephemeral=True )
     picker_view.message = await interaction.original_response()
-# @admin_menu.command(name="delete_user_schedule", description="Admin: Delete schedules for members/role")
-# @app_commands.checks.has_permissions(manage_guild=True)
-# @app_commands.autocomplete(name=event_autocomplete)
-# async def admin_delete_user_schedule(interaction: Interaction, name: str,  member1: discord.Member = None, member2: discord.Member = None, member3: discord.Member = None, member4: discord.Member = None, member5: discord.Member = None, role: discord.Role = None):
-#     gid = str(interaction.guild.id)
-
-#     if name.isdigit():
-#         row = await query_db("SELECT name, username, day_of_week, time_24h FROM schedules WHERE rowid = ? AND guild_id = ?", (int(name), gid), one=True)
-#         if not row:
-#             return await interaction.response.send_message("❌ Schedule not found.", ephemeral=True)
-
-#         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-#         info = f"**{row[0]}** for **{row[1]}** ({days[row[2]]} @ {row[3]})"
-        
-#         view = DeleteConfirm()
-#         await interaction.response.send_message(f" **ADMIN**: Delete this schedule?\n> {info}", view=view, ephemeral=True)
-#         await view.wait()
-        
-#         if view.value:
-#             await query_db("DELETE FROM schedules WHERE rowid = ?", (int(name),))
-#             await interaction.edit_original_response(content=f"✅ Deleted: {info}", view=None)
-#         return
-    
-#     targets = {m for m in [member1, member2, member3, member4, member5] if m}
-#     if role:
-#         targets.update(m for m in role.members if not m.bot)
-    
-#     if not targets:
-#         return await interaction.response.send_message("❌ Select a schedule from the list OR specify members/role.", ephemeral=True)
-
-#     target_ids = [str(m.id) for m in targets]
-#     rows = await query_db(f"SELECT name FROM schedules WHERE name = ? AND guild_id = ? AND user_id IN ({','.join(['?']*len(target_ids))})", (name, gid, *target_ids))
-
-#     if not rows:
-#         return await interaction.response.send_message(f"❌ No schedules named '{name}' found for those targets.", ephemeral=True)
-
-#     view = DeleteConfirm()
-#     await interaction.response.send_message(f" **ADMIN**: Delete **{len(rows)}** schedules named '**{rows[0][0]}**' for the selected group?", view=view, ephemeral=True)
-
-#     await view.wait()
-#     if view.value:
-#         for uid in target_ids:
-#             await query_db("DELETE FROM schedules WHERE user_id = ? AND guild_id = ? AND name = ?", (uid, gid, name))
-#         await interaction.edit_original_response(content=f"✅ Admin deleted {len(rows)} records.", view=None)
-
 
 
 #backup
