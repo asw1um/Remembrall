@@ -134,6 +134,7 @@ Built for scale. No more one-by-one commands.
     - **decluttering for cleaner look** time and members are decluttered
     - **added filtering ** for listing, clearing
     - **custom naggin time and notes** notes are not available for create_quick
-    - **auto deletion of dms while leaving record**
+    - **auto deletion of dms while leaving record** for both vc and check in button
     - **updated some admin functions to be more QOL**
     - **persistent buttons** useable even after bot restarts
+

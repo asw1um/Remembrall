@@ -1689,16 +1689,38 @@ async def auto_check():
 #vc
 @bot.event
 async def on_voice_state_update(member, before, after):
-
     if before.channel is None and after.channel is not None:
         gid, uid = str(member.guild.id), str(member.id)
+        old_prompts = await query_db(
+            "SELECT last_dm_message_id FROM events WHERE user_id = ? AND guild_id = ? AND lateness IS NULL AND last_dm_message_id IS NOT NULL",
+            (uid, gid)
+        )
+        
+        if old_prompts:
+            chan = await get_log_channel(member.guild)
+            if chan:
+                for row in old_prompts:
+                    old_msg_id = row.get("last_dm_message_id") if isinstance(row, dict) else row[0]
+                    if old_msg_id:
+                        try:
+                            old_msg = await chan.fetch_message(int(old_msg_id))
+                            await old_msg.delete()
+                        except (discord.NotFound, discord.HTTPException):
+                            pass # Already deleted
 
-        active = await query_db( "SELECT name, time, rowid FROM events ""WHERE user_id = ? AND guild_id = ? AND lateness IS NULL AND checkin_options = ? " "ORDER BY time ASC LIMIT 1",  (uid, gid,1) )
+        active = await query_db("SELECT name, time, rowid, last_dm_message_id FROM events ""WHERE user_id = ? AND guild_id = ? AND lateness IS NULL AND checkin_options = ? ""ORDER BY time ASC LIMIT 1",(uid, gid, 1))
         
         if not active:
             return
 
-        name, timestamp, rid = active[0]
+        if isinstance(active[0], dict):
+            name = active[0].get("name")
+            timestamp = active[0].get("time")
+            rid = active[0].get("rowid")
+            msg_id = active[0].get("last_dm_message_id")
+        else:
+            name, timestamp, rid, msg_id = active[0][0], active[0][1], active[0][2], active[0][3]
+            
         try:
             date_format = "%Y-%m-%d %H:%M" if len(timestamp) > 5 else "%H:%M"
             now = datetime.now()
@@ -1709,25 +1731,48 @@ async def on_voice_state_update(member, before, after):
             
             diff = int((now - event_dt).total_seconds())
 
-            # diff -7200 = 2 hours early
-            # diff 21600 = 6 hours late
             if diff < -7200 or diff > 21600:
                 return
 
-            await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, rid) )
+            await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, rid))
             
-            chan = await get_log_channel(member.guild)
-            if chan:
-                m, s = abs(diff) // 60, abs(diff) % 60
-                if diff < 0:
-                    await chan.send(f"🏃 **{member.mention}** is early! Saved **{m}m {s}s** for '**{name}**'.")
-                else:
-                    await chan.send(f"✅ **{member.mention}** arrived! Late for '**{name}**': **{m}m {s}s**.")
+            m, s = abs(diff) // 60, abs(diff) % 60
+            time_formatted = f"{m}m {s}s"
+            
+            if diff < 0:
+                metrics_str = f"Marked as **{time_formatted} early**."
+                dm_text = f"⚡ **Voice Check-in Successful!**\n└ You arrived **{time_formatted} early** for '**{name}**'."
+            else:
+                metrics_str = f"Marked as **{time_formatted} late**."
+                dm_text = f"⚠️ **Voice Check-in Successful!**\n└ You checked in **{time_formatted} late** for '**{name}**'."
+
+            if msg_id:
+                chan = await get_log_channel(member.guild)
+                if chan:
+                    try:
+                        target_msg = await chan.fetch_message(int(msg_id))
+
+                        updated_content = (
+                            f"{target_msg.content}\n"
+                            f"-----------------------------\n"
+                            f"✅ **Status:** Checked in successfully!\n"
+                            f"⏱️ **Metrics:** {metrics_str}"
+                        )
+
+                        await target_msg.edit(content=updated_content, view=None)
+                        
+                    except discord.NotFound:
+                        print("Active prompt message was already cleared manually.")
+                    except Exception as edit_err:
+                        print(f"Failed to edit check-in prompt frame: {edit_err}")
+
+            try:
+                await member.send(dm_text)
+            except discord.Forbidden:
+                print(f"Could not send DM update to {member.display_name} (DMs Locked).")
             
         except Exception as e:
             print(f"Error in on_voice_state_update: {e}")
-
-
 @bot.event
 async def on_ready():
     await init_db()
