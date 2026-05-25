@@ -529,7 +529,8 @@ class AdvancedMemberPicker(discord.ui.View):
 # events
 
 @event_menu.command(name="create", description="Schedule an event")
-@app_commands.describe( time="Select or type time (e.g. 14:30)", month="Optional: Change month (Defaults to current)", day="Optional: Change day (Defaults to today)", notes="Extra details (Optional) (Max: 100 characters)", reminder_offset="Minutes late before a warning DM")
+@app_commands.describe( time="Select or type time (e.g. 14:30)", month="Optional: Change month (Defaults to current)", day="Optional: Change day (Defaults to today)", notes="Extra details (Optional) (Max: 100 characters)", checkin_opt="How members should check in (Optional)", reminder_offset="Minutes late before a warning DM")
+@app_commands.choices(checkin_opt=[app_commands.Choice(name="Button only (Primary)", value=0),  app_commands.Choice(name="Additional VC", value=1)])
 @app_commands.autocomplete(time=time_suggester, reminder_offset=reminder_suggester)
 async def create_advanced(interaction: Interaction,  name: str,  time: str, month: int = None,  day: int = None, year: int = None,notes: app_commands.Range[str, 0, 100] = None,  checkin_opt: int = 0, reminder_offset: int = 30):
     
