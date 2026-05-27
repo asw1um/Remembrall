@@ -216,7 +216,37 @@ async def execute_stop_logic(interaction, event_id_str, members_list, role):
                     target_dt = target_dt.replace(year=now.year, month=now.month, day=now.day)
                 diff = int((now - target_dt).total_seconds())
                 last_diff = diff
-                await query_db( "UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid) )
+                await query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid))
+
+                # DM cleanup
+                id_row = await query_db("SELECT last_dm_message_id FROM events WHERE rowid = ?", (rid,), one=True)
+                if id_row and id_row[0]:
+                    dm_channel = await member.create_dm()
+                    for mid in id_row[0].split(","):
+                        try:
+                            old_msg = await dm_channel.fetch_message(int(mid.strip()))
+                            await old_msg.delete()
+                            await asyncio.sleep(0.1)
+                        except (discord.NotFound, discord.HTTPException):
+                            pass
+
+                # Summary DM
+                m, s = abs(diff) // 60, abs(diff) % 60
+                status = "early" if diff < 0 else "late"
+                summary_content = (
+                    f"🛑 **Event Manually Stopped**\n"
+                    f"📝 **Event Name:** '{actual_event_name}'\n"
+                    f"📅 **Scheduled Date:** {target_dt.strftime('%A, %B %d, %Y')}\n"
+                    f"⏰ **Scheduled Time:** {target_dt.strftime('%H:%M')}\n"
+                    f"───────────────────\n"
+                    f"✅ **Status:** Checked in successfully!\n"
+                    f"⏱️ **Metrics:** Marked as **{m}m {s}s {status}**."
+                )
+                try:
+                    await member.send(summary_content)
+                except discord.Forbidden:
+                    pass
+
                 success_count += 1
             except Exception as e:
                 print(f"[Stop] Failed for {member.name}: {e}")
@@ -499,7 +529,7 @@ class AdvancedMemberPicker(discord.ui.View):
                 
                 dm_text += "\n\nUse the button below to check in when the event starts!"
                 
-                await member.send(dm_text, view=view)
+                await send_tracked_dm(member, event_id, content = dm_text, view=view)
             except discord.Forbidden:
                 print(f"Could not DM {member.name}")
 
@@ -623,10 +653,10 @@ class QuickMemberPicker(discord.ui.View):
             event_id = last_row[0]
             try:
                 view = CheckInView(event_id=event_id)
-                await member.send(
+                await send_tracked_dm(member, event_id, content = (
                     f"⚡ **Quick Event:** '{self.name}'\n"
                     f"⏰ Time: **{self.dt_str}**\n\n"
-                    "Click the button below to check in!",
+                    "Click the button below to check in!"),
                     view=view
                 )
             except discord.Forbidden:
@@ -762,17 +792,36 @@ async def delete_event(interaction: discord.Interaction, event_name: str):
         return await interaction.response.send_message("❌ Invalid selection.", ephemeral=True)
     
     uid = str(interaction.user.id)
-    row = await query_db("SELECT name, time FROM events WHERE rowid = ? AND user_id = ?", (int(event_name), uid), one=True) 
+    row = await query_db("SELECT name, time, last_dm_message_id FROM events WHERE rowid = ? AND user_id = ?", (int(event_name), uid), one=True) 
     if not row:
         return await interaction.response.send_message("❌ Record not found.", ephemeral=True)
-
-    event_label = f"**{row[0]}** ({row[1]})"
+    if isinstance(row, dict):
+        name_val = row.get("name")
+        time_val = row.get("time")
+        msg_id = row.get("last_dm_message_id")
+    else:
+        name_val, time_val, msg_id = row[0], row[1], row[2]
+    event_label = f"**{name_val}** ({time_val})"
     view = DeleteConfirm()
     await interaction.response.send_message(f"⚠️ Are you sure you want to delete the record for {event_label}?",view=view,ephemeral=True)
     await view.wait()
     if view.value is None:
         await interaction.edit_original_response(content=" Request timed out.", view=None)
     elif view.value:
+        if msg_id:
+            try:
+                target_user = await bot.fetch_user(int(uid))
+                dm_channel = await target_user.create_dm()
+                for mid in msg_id.split(","):
+                    try:
+                        old_msg = await dm_channel.fetch_message(int(mid.strip()))
+                        await old_msg.delete()
+                        await asyncio.sleep(0.1)
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
+            except Exception as e:
+                print(f"Could not clean up DM for deleted event: {e}")
+                    
         await query_db("DELETE FROM events WHERE rowid = ?", (int(event_name),))
         await interaction.edit_original_response(content=f" Deleted {event_label}.", view=None)
     else:
@@ -1041,17 +1090,118 @@ class AdminActionPicker(discord.ui.View):
             uid = str(member.id)
             if self.mode == "delete":
                 if self.event_name.isdigit():
+                    row = await query_db("SELECT last_dm_message_id FROM events WHERE rowid = ?", (int(self.event_name),), one=True)
+                    msg_ids = [row[0]] if row and row[0] else []
                     await query_db("DELETE FROM events WHERE rowid = ?", (int(self.event_name),))
                 else:
+                    rows = await query_db(
+                        "SELECT last_dm_message_id FROM events WHERE user_id = ? AND guild_id = ? AND name = ?",
+                        (uid, self.gid, self.actual_name)
+                    )
+                    msg_ids = [r[0] for r in rows if r and r[0]]
                     await query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ? AND name = ?", (uid, self.gid, self.actual_name))
+
+                try:
+                    target_user = await bot.fetch_user(int(uid))
+                    dm_channel = await target_user.create_dm()
+                    for msg_id_str in msg_ids:
+                        for mid in msg_id_str.split(","):
+                            try:
+                                old_msg = await dm_channel.fetch_message(int(mid.strip()))
+                                await old_msg.delete()
+                                await asyncio.sleep(0.1)
+                            except (discord.NotFound, discord.HTTPException):
+                                pass
+                except Exception as e:
+                    print(f"Could not clean up DMs for admin delete: {e}")
+
             elif self.mode == "clear":
                 await query_db("DELETE FROM events WHERE user_id = ? AND guild_id = ?", (uid, self.gid))
                 await query_db("DELETE FROM schedules WHERE user_id = ? AND guild_id = ?", (uid, self.gid))
             elif self.mode == "stop":
                 if self.event_name.isdigit():
-                    await query_db("UPDATE events SET started = 0 WHERE rowid = ?", (int(self.event_name),))
-                else:
-                    await query_db("UPDATE events SET started = 0 WHERE user_id = ? AND guild_id = ? AND name = ?", (uid, self.gid, self.actual_name))
+                    now = datetime.now()
+                    if self.event_name.isdigit():
+                        row = await query_db(
+                            "SELECT time, last_dm_message_id FROM events WHERE rowid = ?",
+                            (int(self.event_name),), one=True
+                        )
+                        if row:
+                            time_str, msg_id_str = row[0], row[1]
+                            try:
+                                event_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+                                diff = int((now - event_dt).total_seconds())
+                                await query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, int(self.event_name)))
+                            except ValueError:
+                                diff, event_dt = 0, now
+
+                            if msg_id_str:
+                                try:
+                                    dm_channel = await member.create_dm()
+                                    for mid in msg_id_str.split(","):
+                                        try:
+                                            old_msg = await dm_channel.fetch_message(int(mid.strip()))
+                                            await old_msg.delete()
+                                            await asyncio.sleep(0.1)
+                                        except (discord.NotFound, discord.HTTPException):
+                                            pass
+                                except Exception as e:
+                                    print(f"Could not clean up DMs for admin stop: {e}")
+
+                            m, s = abs(diff) // 60, abs(diff) % 60
+                            status = "early" if diff < 0 else "late"
+                            try:
+                                await member.send(
+                                    f"🛑 **Event Manually Stopped**\n"
+                                    f"📝 **Event Name:** '{self.actual_name}'\n"
+                                    f"📅 **Scheduled Date:** {event_dt.strftime('%A, %B %d, %Y')}\n"
+                                    f"⏰ **Scheduled Time:** {event_dt.strftime('%H:%M')}\n"
+                                    f"───────────────────\n"
+                                    f"✅ **Status:** Checked in successfully!\n"
+                                    f"⏱️ **Metrics:** Marked as **{m}m {s}s {status}**."
+                                )
+                            except discord.Forbidden:
+                                pass
+                    else:
+                        rows = await query_db(
+                            "SELECT rowid, time, last_dm_message_id FROM events WHERE user_id = ? AND guild_id = ? AND name = ? AND lateness IS NULL",
+                            (uid, self.gid, self.actual_name)
+                        )
+                        for rid, time_str, msg_id_str in rows:
+                            try:
+                                event_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+                                diff = int((now - event_dt).total_seconds())
+                                await query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid))
+                            except ValueError:
+                                diff, event_dt = 0, now
+
+                            if msg_id_str:
+                                try:
+                                    dm_channel = await member.create_dm()
+                                    for mid in msg_id_str.split(","):
+                                        try:
+                                            old_msg = await dm_channel.fetch_message(int(mid.strip()))
+                                            await old_msg.delete()
+                                            await asyncio.sleep(0.1)
+                                        except (discord.NotFound, discord.HTTPException):
+                                            pass
+                                except Exception as e:
+                                    print(f"Could not clean up DMs for admin stop: {e}")
+
+                            m, s = abs(diff) // 60, abs(diff) % 60
+                            status = "early" if diff < 0 else "late"
+                            try:
+                                await member.send(
+                                    f"🛑 **Event Manually Stopped**\n"
+                                    f"📝 **Event Name:** '{self.actual_name}'\n"
+                                    f"📅 **Scheduled Date:** {event_dt.strftime('%A, %B %d, %Y')}\n"
+                                    f"⏰ **Scheduled Time:** {event_dt.strftime('%H:%M')}\n"
+                                    f"───────────────────\n"
+                                    f"✅ **Status:** Checked in successfully!\n"
+                                    f"⏱️ **Metrics:** Marked as **{m}m {s}s {status}**."
+                                )
+                            except discord.Forbidden:
+                                pass
             count += 1
 
         verb = "Deleted" if self.mode == "delete" else "Wiped" if self.mode == "clear" else "Stopped"
