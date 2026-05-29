@@ -136,5 +136,16 @@ Built for scale. No more one-by-one commands.
     - **custom naggin time and notes** notes are not available for create_quick
     - **auto deletion of dms while leaving record** for both vc and check in button
     - **updated some admin functions to be more QOL**
+    - **updated autocheck to include early reminders** (
+7 Days Before: Triggers a DM notice exactly 1 week out.
+
+1 Day Before: Triggers a "starts tomorrow" summary DM 24 hours out.
+
+For events scheduled 7+ hours in advance: User receives a 2 and 1-hour early reminder.
+
+For events scheduled 3+ hours in advance:User receives a 1-hour and 30 min early reminder
+
+For events scheduled between 1.5 hours and 3 hours in advance: User receives a 30-minute early final warning.
+)
     - **persistent buttons** useable even after bot restarts
 

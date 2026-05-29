@@ -1328,7 +1328,7 @@ async def admin_stop(interaction: discord.Interaction, event_name: str, scope: s
     view.message = await interaction.original_response()
 
 class RecordMemberPicker(discord.ui.View):
-    def __init__(self, event_name, dt_str, lateness_seconds, gid, admin_user: discord.Member):
+    def __init__(self, event_name, dt_str, lateness_seconds, gid, notes, admin_user: discord.Member):
         super().__init__(timeout=60)
         self.event_name = event_name
         self.dt_str = dt_str
@@ -1336,6 +1336,7 @@ class RecordMemberPicker(discord.ui.View):
         self.gid = gid
         self.targets = {admin_user}
         self.message = None
+        self.notes = notes
 
     @discord.ui.select(cls=discord.ui.MentionableSelect, placeholder="Select members/roles for this record...", min_values=1, max_values=25)
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.MentionableSelect):
@@ -1356,17 +1357,40 @@ class RecordMemberPicker(discord.ui.View):
         await interaction.response.edit_message(content="⏳ **Writing to database...**", view=self)
 
         mentions = []
+        m, s = abs(self.lateness_seconds) // 60, abs(self.lateness_seconds) % 60
+        time_formatted = f"{m}m {s}s"
+        if self.lateness_seconds < 0:
+            status_str = f"**{time_formatted} early**"
+        elif self.lateness_seconds == 0:
+            status_str = "**on time**"
+        else:
+            status_str = f"**{time_formatted} late**"
+
         for member in self.targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (self.gid, str(member.id), member.name, self.event_name, self.dt_str, self.lateness_seconds)
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, notes) VALUES (?, ?, ?, ?, ?, ?, 0,?)",
+                (self.gid, str(member.id), member.name, self.event_name, self.dt_str, self.lateness_seconds, self.notes)
             )
             mentions.append(member.mention)
+            dm_text = (
+                f"📋 **New Event Record Logged!**\n"
+                f"📝 **Event Name:** '{self.event_name}'\n"
+                f"📆 **Scheduled Time:** {self.dt_str}\n"
+                f"-----------------------------------------\n"
+                f"⏱️ **Metrics:** Marked as {status_str}."
+            )
+            if self.notes and self.notes.strip():
+                dm_text += f"ℹ️**Note:** *{self.notes}*\n"
 
+            try:
+                await member.send(dm_text)
+
+            except discord.Forbidden:
+                print(f"Could not DM summary to {member.display_name} (DMs locked).")
         await interaction.followup.send(
             f"✅ **Record Logged!**\n"
             f"📝 **Event:** {self.event_name} ({self.dt_str})\n"
-            f"⏰ **Lateness:** {self.lateness_seconds // 60}m\n"
+            f"⏰ **Lateness:** {time_formatted}m\n"
             f"👥 **Participants:** {', '.join(mentions)}",
             ephemeral=False
         )
@@ -1379,9 +1403,9 @@ class RecordMemberPicker(discord.ui.View):
 
 @admin_menu.command(name="add_record", description="Admin: Log a finished event record")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(event_name="Name of the event (e.g. Weekly Meeting)", time="HH:MM (e.g. 14:00)",lateness_minutes="How many minutes late? (Use 0 for on-time)",month="Optional: 1-12",day="Optional: 1-31")
+@app_commands.describe(event_name="Name of the event (e.g. Weekly Meeting)", time="HH:MM (e.g. 14:00)",lateness_minutes="How many minutes late? (Use 0 for on-time)",notes="Context notes for this entry",year="Optional: Custom year (e.g. 2026)",month="Optional: 1-12",day="Optional: 1-31")
 @app_commands.autocomplete(time=time_suggester)
-async def admin_add_record(interaction: discord.Interaction,  event_name: str,   time: str,   lateness_minutes: int,  month: int = None,  day: int = None):
+async def admin_add_record(interaction: discord.Interaction,  event_name: str,   time: str,   lateness_minutes: int, notes: str=None,  year: int = None, month: int = None,  day: int = None):
     
     now = datetime.now()
 
@@ -1393,10 +1417,11 @@ async def admin_add_record(interaction: discord.Interaction,  event_name: str,  
     except:
         return await interaction.response.send_message("❌ **Invalid Time:** Use HH:MM.", ephemeral=True)
 
+    y = year or now.year
     mon = month or now.month
     d = day or now.day
     try:
-        valid_dt = datetime(now.year, mon, d, h, m)
+        valid_dt = datetime(y, mon, d, h, m)
     except ValueError:
         return await interaction.response.send_message("❌ **Invalid Date.**", ephemeral=True)
 
@@ -1404,7 +1429,7 @@ async def admin_add_record(interaction: discord.Interaction,  event_name: str,  
     lateness_seconds = lateness_minutes * 60
     gid = str(interaction.guild.id)
 
-    view = RecordMemberPicker(event_name, dt_str, lateness_seconds, gid, admin_user = interaction.user)
+    view = RecordMemberPicker(event_name, dt_str, lateness_seconds, gid, notes, admin_user = interaction.user)
     
     await interaction.response.send_message(
         f"📝 **Creating record for '{event_name}'** on **{dt_str}**\n"
@@ -1680,76 +1705,93 @@ async def manual_backup(interaction: discord.Interaction):
     await interaction.response.send_message(f"✅ Backup created: `{filename}`", ephemeral=True)
 
 
-LEAD_MINUTES = 120  # 2 hours 
+LEAD_MINUTES = 24*60*7 #7 days
 
 @tasks.loop(seconds=30)
 async def auto_check():
     now = datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M")
-    today_str = now.strftime("%Y-%m-%d")
-    day_idx = now.weekday()
+    #today_str = now.strftime("%Y-%m-%d")
     yesterday_str = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
 
-    all_today = await query_db(
-        "SELECT guild_id, user_id, username, name, end_time_24h, time_24h, checkin_options "
-        "FROM schedules WHERE day_of_week = ?", (day_idx,)
-    )
+    #insert for the full week for schedules
+    for day_offset in range(8):
+        future_date = now + timedelta(days=day_offset)
+        future_today_str = future_date.strftime("%Y-%m-%d")
+        day_idx = future_date.weekday()
 
-    for gid, uid, uname, name, end_t, start_t, checkin_opt in all_today:
+        all_on_day = await query_db("SELECT guild_id, user_id, username, name, end_time_24h, time_24h FROM schedules WHERE day_of_week = ?", (day_idx,))
+
+        for gid, uid, uname, name, end_t, start_t in all_on_day:
+            try:
+                start_dt = datetime.strptime(f"{future_today_str} {start_t}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+
+            diff_minutes = (start_dt - now).total_seconds() / 60
+
+            if 0 < diff_minutes <= LEAD_MINUTES:
+                exists = await query_db("SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time = ?",(uid, name, start_dt.strftime("%Y-%m-%d %H:%M")), one=True)
+                if not exists:
+                    await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, start_dt.strftime("%Y-%m-%d %H:%M")))
+
+    upcoming_events = await query_db("SELECT rowid, user_id, name, time, dm_sent FROM events WHERE lateness IS NULL AND time >= ?",(now_str,) )
+
+    for eid, uid, name, etime, current_milestone in upcoming_events:
         try:
-            start_dt = datetime.strptime(f"{today_str} {start_t}", "%Y-%m-%d %H:%M")
-        except ValueError:
-            continue
+            start_dt = datetime.strptime(etime, "%Y-%m-%d %H:%M")
+            hours_until = (start_dt - now).total_seconds() / 3600
+            minutes_until = int((start_dt - now).total_seconds() / 60)
+            
+            target_milestone = None
+            time_msg = ""
 
-        diff_minutes = (start_dt - now).total_seconds() / 60
+            # Check intervals using negative tracking values
+            if 167 <= hours_until <= 168 and current_milestone > -7:
+                target_milestone = -7
+                time_msg = "starts in **7 days**"
+            elif 23 <= hours_until <= 24 and current_milestone > -1:
+                target_milestone = -1
+                time_msg = "starts tomorrow (**24 hours**)"
+            elif hours_until >= 7 and 119 <= minutes_until <= 120 and current_milestone > -2:
+                target_milestone = -2
+                time_msg = "starts in **2 hours**"
+            elif hours_until >= 3 and 59 <= minutes_until <= 60 and current_milestone > -3:
+                target_milestone = -3
+                time_msg = "starts in **1 hour**"
+            elif 1.5 <= hours_until < 3 and 29 <= minutes_until <= 30 and current_milestone > -4:
+                target_milestone = -4
+                time_msg = "starts in **30 minutes**"
 
-        if not (-1 < diff_minutes <= LEAD_MINUTES):
-            continue
-        exists = await query_db( "SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time LIKE ?",(uid, name, f"{today_str}%"), one=True )
-        if exists:
-            continue
+            if target_milestone is not None:
+                user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+                if user:
+                    sched_data = await query_db(
+                        "SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?",
+                        (str(uid), name), one=True
+                    )
+                    end_val = sched_data[0] if sched_data else None
 
-        actual_start_str = start_dt.strftime("%Y-%m-%d %H:%M")
-        
-        await query_db( "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, actual_start_str))
+                    view = CheckInView(event_id=eid, end_time_str=end_val)
+                    embed = discord.Embed(
+                        title="⌛ UPCOMING EVENT REMINDER",
+                        description=f"Your event **{name}** {time_msg}!\n\nCheck in scheduled for: `{etime}`.",
+                        color=0xFFD700
+                    )
 
-    to_notify = await query_db( 
-    "SELECT rowid, user_id, name, time FROM events WHERE dm_sent = 0 AND lateness IS NULL AND time >= ?",
-    (yesterday_str,)
-    )
+                    await send_tracked_dm(user, eid, embed=embed, view=view)
+                    await query_db("UPDATE events SET dm_sent = ? WHERE rowid = ?", (target_milestone, eid))
 
-    for eid, uid, name, etime in to_notify:
-        try:
-            row = await query_db("SELECT lateness FROM events WHERE rowid = ?", (eid,), one=True)
-            if row and row[0] is not None:
-                continue 
-
-            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
-            if user:
-                sched_data = await query_db( "SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?",(str(uid), name), one=True )
-                end_val = sched_data[0] if sched_data else None
-
-                try:
-                    start_dt = datetime.strptime(etime, "%Y-%m-%d %H:%M")
-                    mins_until = int((start_dt - now).total_seconds() / 60)
-                    time_msg = f"starts in **{mins_until} minutes**" if mins_until > 0 else "has started"
-                except ValueError:
-                    time_msg = "is starting soon"
-
-                view = CheckInView(event_id=eid, end_time_str=end_val)
-                embed = discord.Embed(
-                    title="⌛ THE CLOCK IS TICKING",
-                    description=(f"Your event **{name}** {time_msg}!\n\n" f"Check in before **{end_val or 'the deadline'}**."), 
-                    color=0xFFD700 
-                )
-
-                await send_tracked_dm(user, eid, embed=embed, view=view)
-                await query_db("UPDATE events SET dm_sent = 1, started = 1 WHERE rowid = ?", (eid,))
-                
         except Exception as e:
-            print(f"Error in auto_check ping: {e}")
+            print(f"Error handling early reminder evaluation rules: {e}")
 
-    #30 min later dm
+
+    await query_db(
+        "UPDATE events SET dm_sent = 1, started = 1 WHERE lateness IS NULL AND dm_sent <= 0 AND time <= ?", 
+        (now_str,)
+    )
+
+    #reminder dm
     if now.second < 30:
         late_candidates = await query_db( "SELECT rowid, user_id, name, time, reminder_offset, notes, last_reminder_time ""FROM events WHERE lateness IS NULL AND dm_sent = 1" )
 
