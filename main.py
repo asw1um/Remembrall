@@ -705,7 +705,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
     guild_id = str(interaction.guild.id)
     now_str = datetime.now().strftime("%Y-%m-%d")
     
-    query = "SELECT user_id, username, name, time, lateness, started, notes FROM events WHERE guild_id = ?"
+    query = "SELECT user_id, username, name, time, lateness, started, notes, rowid FROM events WHERE guild_id = ?"
     params = [guild_id]
     
     if member:
@@ -722,9 +722,10 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
         query += " AND time LIKE ?"
         params.append(f"{now_str}%")
     elif timeframe == "week":
-        one_week_later = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+        start_bound = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d 00:00")
+        end_bound = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d 23:59")
         query += " AND time BETWEEN ? AND ?"
-        params.extend([f"{now_str} 00:00", one_week_later])
+        params.extend([start_bound, end_bound])
 
     query += " ORDER BY user_id ASC, time ASC"
     
@@ -747,7 +748,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
     curr_user = None
     msg_lines = [msg]
     
-    for uid, uname, name, timestamp, late, started, notes in rows:
+    for uid, uname, name, timestamp, late, started, notes, _ in rows:
         if scope == "server" and not member and uid != curr_user:
             curr_user = uid
             msg_lines.append(f"\n👤 **{uname or f'<@{uid}>'}**")
