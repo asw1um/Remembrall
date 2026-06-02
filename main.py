@@ -1786,10 +1786,30 @@ async def auto_check():
             print(f"Error handling early reminder evaluation rules: {e}")
 
 
-    await query_db(
-        "UPDATE events SET dm_sent = 1, started = 1 WHERE lateness IS NULL AND dm_sent <= 0 AND time <= ?", 
-        (now_str,)
-    )
+    just_started = await query_db("SELECT rowid, user_id, name, time FROM events WHERE lateness IS NULL AND dm_sent <= 0 AND time <= ?",(now_str,))
+
+    for eid, uid, name, etime in just_started:
+        try:
+            user = bot.get_user(int(uid)) or await bot.fetch_user(int(uid))
+            if user:
+                sched_data = await query_db("SELECT end_time_24h FROM schedules WHERE user_id = ? AND name = ?",(str(uid), name), one=True)
+                end_val = sched_data[0] if sched_data else None
+
+                view = CheckInView(event_id=eid, end_time_str=end_val)
+                embed = discord.Embed(
+                    title="⌛ THE CLOCK IS TICKING",
+                    description=(
+                        f"Your event **{name}** has started!\n\n"
+                        f"Check in before **{end_val or 'the deadline'}**."
+                    ),
+                    color=0xFFD700
+                )
+                await send_tracked_dm(user, eid, embed=embed, view=view)
+
+        except Exception as e:
+            print(f"Error sending start DM for event {eid}: {e}")
+
+        await query_db("UPDATE events SET dm_sent = 1, started = 1 WHERE rowid = ?", (eid,))
 
     #reminder dm
     if now.second < 30:
