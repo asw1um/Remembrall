@@ -644,8 +644,9 @@ class QuickMemberPicker(discord.ui.View):
 
         mentions = []
         for member in self.targets:
-            await query_db( "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, reminder_offset, last_reminder_time) "
-                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL)", 
+            await query_db(
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, reminder_offset, last_reminder_time) "
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL)",
                 (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, self.reminder_offset)
             )
 
@@ -1903,6 +1904,8 @@ async def auto_check():
 #vc
 @bot.event
 async def on_voice_state_update(member, before, after):
+    if before.channel is not None and after.channel is None:
+        return
     if before.channel is None and after.channel is not None:
         gid, uid = str(member.guild.id), str(member.id)
         old_prompts = await query_db(
@@ -1911,14 +1914,16 @@ async def on_voice_state_update(member, before, after):
         )
         
         if old_prompts:
-            chan = await get_log_channel(member.guild)
-            if chan:
-                for row in old_prompts:
-                    old_msg_id = row.get("last_dm_message_id") if isinstance(row, dict) else row[0]
-                    if old_msg_id:
+            dm_channel = await member.create_dm()
+
+            for row in old_prompts:
+                old_msg_id = row.get("last_dm_message_id") if isinstance(row, dict) else row[0]
+                if old_msg_id:
+                    for mid in old_msg_id.split(","):
                         try:
-                            old_msg = await chan.fetch_message(int(old_msg_id))
+                            old_msg = await dm_channel.fetch_message(int(old_msg_id))
                             await old_msg.delete()
+                            await asyncio.sleep(0.1)
                         except (discord.NotFound, discord.HTTPException):
                             pass # Already deleted
 
@@ -1982,6 +1987,9 @@ async def on_voice_state_update(member, before, after):
 
             try:
                 await member.send(dm_text)
+                chan = await get_log_channel(member.guild)
+                if chan:
+                    await chan.send(f"**{member.display_name}** checked in via voice! ({m}m {s}s {'early' if diff < 0 else 'late'} for '**{name}**')")
             except discord.Forbidden:
                 print(f"Could not send DM update to {member.display_name} (DMs Locked).")
             
