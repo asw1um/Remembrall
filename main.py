@@ -355,7 +355,7 @@ class CheckInView(discord.ui.View):
             await query_db("UPDATE events SET lateness = -9999 WHERE rowid = ? AND lateness IS NULL", (eid,))
             
             row = await query_db(
-                "SELECT name, time, lateness, guild_id FROM events WHERE rowid = ?", 
+                "SELECT name, time, lateness, guild_id, grace_minutes FROM events WHERE rowid = ?", 
                 (eid,), one=True
             )
      
@@ -367,8 +367,9 @@ class CheckInView(discord.ui.View):
                 timestamp = row.get("time")
                 current_lateness = row.get("lateness")
                 guild_id = row.get("guild_id")
+                grace_minutes = row.get("grace_minutes")
             else:
-                name, timestamp, current_lateness, guild_id = row[0], row[1], row[2], row[3]
+                name, timestamp, current_lateness, guild_id, grace_minutes = row[0], row[1], row[2], row[3], row[4]
 
             if current_lateness is not None and current_lateness != -9999:
                 return await interaction.response.send_message("⚠️ You have already checked in for this event!", ephemeral=True)
@@ -397,6 +398,9 @@ class CheckInView(discord.ui.View):
                     pass  
 
             diff = int((now - event_dt).total_seconds())
+            grace_minutes = grace_minutes or 0
+            if 0<=diff<= (grace_minutes * 60):
+                diff = 0
             await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, eid))
      
             m, s = abs(diff) // 60, abs(diff) % 60
@@ -476,7 +480,7 @@ async def reminder_suggester(interaction: discord.Interaction, current: str):
     return choices[:25]
 
 class AdvancedMemberPicker(discord.ui.View):
-    def __init__(self, name, dt_str, notes, checkin_opt, reminder_offset, gid):
+    def __init__(self, name, dt_str, notes, checkin_opt, reminder_offset, gid, grace_minutes):
         super().__init__(timeout=120) # 2 minutes for advanced setup
         self.name = name
         self.dt_str = dt_str
@@ -484,6 +488,7 @@ class AdvancedMemberPicker(discord.ui.View):
         self.checkin_opt = checkin_opt
         self.reminder_offset = reminder_offset
         self.gid = gid
+        self.grace_minutes = grace_minutes
         self.targets = set()
         self.message = None # For timeout cleanup
 
@@ -513,9 +518,9 @@ class AdvancedMemberPicker(discord.ui.View):
 
         for member in self.targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, notes, reminder_offset, last_reminder_time) "
-                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, NULL)", 
-                (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, clean_notes, self.reminder_offset)
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, notes, reminder_offset, last_reminder_time, grace_minutes) "
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, NULL,?)", 
+                (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, clean_notes, self.reminder_offset, self.grace_minutes)
             )
             
             last_row = await query_db("SELECT last_insert_rowid()", one=True)
@@ -559,10 +564,10 @@ class AdvancedMemberPicker(discord.ui.View):
 # events
 
 @event_menu.command(name="create", description="Schedule an event")
-@app_commands.describe( time="Select or type time (e.g. 14:30)", month="Optional: Change month (Defaults to current)", day="Optional: Change day (Defaults to today)", notes="Extra details (Optional) (Max: 100 characters)", checkin_opt="How members should check in (Optional)", reminder_offset="Minutes late before a warning DM")
+@app_commands.describe( time="Select or type time (e.g. 14:30)", month="Optional: Change month (Defaults to current)", day="Optional: Change day (Defaults to today)", notes="Extra details (Optional) (Max: 100 characters)", checkin_opt="How members should check in (Optional)",  reminder_offset="(default = 30 min) Minutes late before a warning (Optional)", grace_minutes = "(default = 0) Grace Period before latness starts (Optional)")
 @app_commands.choices(checkin_opt=[app_commands.Choice(name="Button only (Primary)", value=0),  app_commands.Choice(name="Additional VC", value=1)])
 @app_commands.autocomplete(time=time_suggester, reminder_offset=reminder_suggester)
-async def create_advanced(interaction: Interaction,  name: str,  time: str, month: int = None,  day: int = None, year: int = None,notes: app_commands.Range[str, 0, 100] = None,  checkin_opt: int = 0, reminder_offset: int = 30):
+async def create_advanced(interaction: Interaction,  name: str,  time: str, month: int = None,  day: int = None, year: int = None,notes: app_commands.Range[str, 0, 100] = None,  checkin_opt: int = 0, reminder_offset: int = 30, grace_minutes: app_commands.Range[int, 0, 59] = 0):
     
     now = datetime.now()
     
@@ -592,7 +597,7 @@ async def create_advanced(interaction: Interaction,  name: str,  time: str, mont
     view = AdvancedMemberPicker(
         name=name, dt_str=dt_str, notes=notes, 
         checkin_opt=checkin_opt, reminder_offset=reminder_offset, 
-        gid=str(interaction.guild.id)
+        gid=str(interaction.guild.id), grace_minutes = grace_minutes
     )
 
     await interaction.response.send_message(
@@ -603,13 +608,14 @@ async def create_advanced(interaction: Interaction,  name: str,  time: str, mont
     view.message = await interaction.original_response()
 
 class QuickMemberPicker(discord.ui.View):
-    def __init__(self, name, dt_str, minutes, checkin_opt, reminder_offset, gid):
+    def __init__(self, name, dt_str, minutes, checkin_opt, reminder_offset, gid, grace_minutes):
         super().__init__(timeout=60)
         self.name, self.dt_str = name, dt_str
         self.minutes = minutes
         self.checkin_opt = checkin_opt
         self.reminder_offset = reminder_offset
         self.gid = gid
+        self.grace_minutes = grace_minutes
         self.targets = set()
 
     async def on_timeout(self):
@@ -645,8 +651,8 @@ class QuickMemberPicker(discord.ui.View):
         mentions = []
         for member in self.targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, reminder_offset, last_reminder_time) "
-                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL)",
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, reminder_offset, last_reminder_time, grace_minutes) "
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL, ?)",
                 (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, self.reminder_offset)
             )
 
@@ -676,10 +682,10 @@ class QuickMemberPicker(discord.ui.View):
 
 
 @event_menu.command(name="create_quick", description="Quick: 2-step event setup for 'now'")
-@app_commands.describe(name="Name of the event",minutes="How many minutes from now it starts",checkin_opt="How members should check in (Optional)", reminder_offset="Minutes late before a warning (Optional)")
+@app_commands.describe(name="Name of the event",minutes="How many minutes from now it starts",checkin_opt="How members should check in (Optional)", reminder_offset="(default = 30 min) Minutes late before a warning (Optional)", grace_minutes = "(default = 0) Grace Period before latness starts (Optional)")
 @app_commands.autocomplete(reminder_offset=reminder_suggester)
 @app_commands.choices(checkin_opt=[app_commands.Choice(name="Button only (Primary)", value=0),  app_commands.Choice(name="Additional VC", value=1)])
-async def create_quick(interaction: Interaction,   name: str,   minutes: int, checkin_opt: int = 0, reminder_offset: int = 30):
+async def create_quick(interaction: Interaction,   name: str,   minutes: int, checkin_opt: int = 0, reminder_offset: int = 30, grace_minutes: app_commands.Range[int, 0, 59] = 0):
 
     if minutes < 0:
         return await interaction.response.send_message("❌ Minutes cannot be negative!", ephemeral=True)
@@ -692,9 +698,11 @@ async def create_quick(interaction: Interaction,   name: str,   minutes: int, ch
     dt_str = future_time.strftime("%Y-%m-%d %H:%M")
     gid = str(interaction.guild.id)
 
-    view = QuickMemberPicker(name=name, dt_str=dt_str,  minutes=minutes, checkin_opt=checkin_opt, reminder_offset=reminder_offset, gid=gid)
+    view = QuickMemberPicker(name=name, dt_str=dt_str,  minutes=minutes, checkin_opt=checkin_opt, reminder_offset=reminder_offset, gid=gid, grace_minutes = grace_minutes)
 
-    await interaction.response.send_message(f"⚡ Setting up **{name}** for **{dt_str}**.\n"f"Use the menu below to add members/roles, or just click **Confirm** for yourself.", view=view,ephemeral=True )
+    await interaction.response.send_message(f"⚡ Setting up **{name}** for **{dt_str}**.\n"
+                                            f"Who should be added? (Select below or click confirm for just you)"
+                                            , view=view,ephemeral=True )
     view.message = await interaction.original_response()
 
 @event_menu.command(name="list", description="View server or personal events with advanced filters")
@@ -892,10 +900,10 @@ async def clear_self(interaction: Interaction,  timeframe: str = "all",date_sear
     await interaction.edit_original_response(content=f"✅ Done! Your {label} have been successfully cleared.", view=None )
 
 @event_menu.command(name="add_schedule", description="Set a recurring weekly event")
-@app_commands.describe( start_time="HH:MM (e.g. 14:00)",end_time="HH:MM (e.g. 16:00)",checkin_opt="How members should check in",notes="Extra details (Max 100)",reminder_offset="Minutes late before warning")
+@app_commands.describe( start_time="HH:MM (e.g. 14:00)",end_time="HH:MM (e.g. 16:00)",checkin_opt="How members should check in",notes="Extra details (Max 100)", reminder_offset="(default = 30 min) Minutes late before a warning (Optional)", grace_minutes = "(default = 0) Grace Period before latness starts (Optional)")
 @app_commands.autocomplete(start_time=time_suggester, end_time=time_suggester, reminder_offset=reminder_suggester)
 @app_commands.choices(day=[app_commands.Choice(name=d, value=i) for i, d in enumerate(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])])
-async def add_schedule(interaction: Interaction,  name: str,  day: int, start_time: str, end_time: str,  checkin_opt: int = 0,  notes: app_commands.Range[str, 0, 100] = None, reminder_offset: int = 30):
+async def add_schedule(interaction: Interaction,  name: str,  day: int, start_time: str, end_time: str,  checkin_opt: int = 0,  notes: app_commands.Range[str, 0, 100] = None, reminder_offset: int = 30, grace_minutes: int = 0):
     
     def parse_time(t_str):
         t_clean = t_str.replace(":", "").replace(".", "")
@@ -911,8 +919,8 @@ async def add_schedule(interaction: Interaction,  name: str,  day: int, start_ti
         return await interaction.response.send_message("❌ **Invalid Time Format:** Use HH:MM (e.g. 14:30).", ephemeral=True)
 
     await query_db(
-        "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options, notes, reminder_offset) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day, final_start, final_end, checkin_opt, notes, reminder_offset)
+        "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options, notes, reminder_offset, grace_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)",
+        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day, final_start, final_end, checkin_opt, notes, reminder_offset, grace_minutes)
     )
     
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -1442,7 +1450,7 @@ async def admin_add_record(interaction: discord.Interaction,  event_name: str,  
     view.message = await interaction.original_response()
 
 class ScheduleMemberPicker(discord.ui.View):
-    def __init__(self, name, day, start_t, end_t, checkin_opt, notes, reminder_offset, gid):
+    def __init__(self, name, day, start_t, end_t, checkin_opt, notes, reminder_offset, gid, grace_minutes):
         super().__init__(timeout=60)
         self.name = name
         self.day = day
@@ -1451,6 +1459,7 @@ class ScheduleMemberPicker(discord.ui.View):
         self.checkin_opt = checkin_opt
         self.notes = notes
         self.reminder_offset = reminder_offset
+        self.grace_minutes= grace_minutes
         self.gid = gid
         self.targets = set()
         self.message = None
@@ -1477,9 +1486,9 @@ class ScheduleMemberPicker(discord.ui.View):
         mentions = []
         for member in self.targets:
             await query_db(
-                "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options, notes, reminder_offset) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (self.gid, str(member.id), member.name, self.name, self.day, self.start_t, self.end_t, self.checkin_opt, self.notes, self.reminder_offset)
+                "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options, notes, reminder_offset, grace_minutes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)",
+                (self.gid, str(member.id), member.name, self.name, self.day, self.start_t, self.end_t, self.checkin_opt, self.notes, self.reminder_offset, self.grace_minutes)
             )
             mentions.append(member.mention)
 
@@ -1500,10 +1509,10 @@ class ScheduleMemberPicker(discord.ui.View):
 
 @admin_menu.command(name="add_user_schedule", description="Admin: Add schedule for members/role")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe( start_time="HH:MM (e.g. 09:00)", end_time="HH:MM (e.g. 17:00)", checkin_opt="How members should check in", notes="Extra details (Max 100)", reminder_offset="Minutes late before a warning DM")
+@app_commands.describe( start_time="HH:MM (e.g. 09:00)", end_time="HH:MM (e.g. 17:00)", checkin_opt="How members should check in", notes="Extra details (Max 100)",  reminder_offset="(default = 30 min) Minutes late before a warning (Optional)", grace_minutes = "(default = 0) Grace Period before latness starts (Optional)")
 @app_commands.autocomplete(start_time=time_suggester,  end_time=time_suggester,  reminder_offset=reminder_suggester)
 @app_commands.choices( day=[app_commands.Choice(name=d, value=i) for i, d in enumerate(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])],checkin_opt=[app_commands.Choice(name="Button only", value=0), app_commands.Choice(name="Additional VC", value=1)])
-async def admin_add_schedule(interaction: Interaction, name: str,  day: int,  start_time: str,  end_time: str, checkin_opt: int = 0,notes: app_commands.Range[str, 0, 100] = None,reminder_offset: int = 30):
+async def admin_add_schedule(interaction: Interaction, name: str,  day: int,  start_time: str,  end_time: str, checkin_opt: int = 0,notes: app_commands.Range[str, 0, 100] = None,reminder_offset: int = 30,grace_minutes: app_commands.Range[int, 0, 59] = 0 ):
     
     def parse_time(t_str):
         t_clean = t_str.replace(":", "").replace(".", "")
@@ -1521,7 +1530,7 @@ async def admin_add_schedule(interaction: Interaction, name: str,  day: int,  st
     gid = str(interaction.guild.id)
 
 
-    view = ScheduleMemberPicker(name=name,  day=day, start_t=final_start,  end_t=final_end, checkin_opt=checkin_opt, notes=notes,  reminder_offset=reminder_offset, gid=gid )
+    view = ScheduleMemberPicker(name=name,  day=day, start_t=final_start,  end_t=final_end, checkin_opt=checkin_opt, notes=notes,  reminder_offset=reminder_offset, gid=gid, grace_minutes=grace_minutes )
 
     await interaction.response.send_message(
         f"🗓️ **Setting up recurring schedule: {name}**\n"
@@ -1721,9 +1730,9 @@ async def auto_check():
         future_today_str = future_date.strftime("%Y-%m-%d")
         day_idx = future_date.weekday()
 
-        all_on_day = await query_db("SELECT guild_id, user_id, username, name, end_time_24h, time_24h FROM schedules WHERE day_of_week = ?", (day_idx,))
+        all_on_day = await query_db("SELECT guild_id, user_id, username, name, end_time_24h, time_24, grace_minutes FROM schedules WHERE day_of_week = ?", (day_idx,))
 
-        for gid, uid, uname, name, end_t, start_t in all_on_day:
+        for gid, uid, uname, name, end_t, start_t, grace in all_on_day:
             try:
                 start_dt = datetime.strptime(f"{future_today_str} {start_t}", "%Y-%m-%d %H:%M")
             except ValueError:
@@ -1734,7 +1743,7 @@ async def auto_check():
             if 0 < diff_minutes <= LEAD_MINUTES:
                 exists = await query_db("SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time = ?",(uid, name, start_dt.strftime("%Y-%m-%d %H:%M")), one=True)
                 if not exists:
-                    await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, start_dt.strftime("%Y-%m-%d %H:%M")))
+                    await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, start_dt.strftime("%Y-%m-%d %H:%M"), grace))
 
     upcoming_events = await query_db("SELECT rowid, user_id, name, time, dm_sent FROM events WHERE lateness IS NULL AND time >= ?",(now_str,) )
 
@@ -1927,7 +1936,7 @@ async def on_voice_state_update(member, before, after):
                         except (discord.NotFound, discord.HTTPException):
                             pass # Already deleted
 
-        active = await query_db("SELECT name, time, rowid, last_dm_message_id FROM events ""WHERE user_id = ? AND guild_id = ? AND lateness IS NULL AND checkin_options = ? ""ORDER BY time ASC LIMIT 1",(uid, gid, 1))
+        active = await query_db("SELECT name, time, rowid, last_dm_message_id, grace_minutes FROM events ""WHERE user_id = ? AND guild_id = ? AND lateness IS NULL AND checkin_options = ? ""ORDER BY time ASC LIMIT 1",(uid, gid, 1))
         
         if not active:
             return
@@ -1937,8 +1946,9 @@ async def on_voice_state_update(member, before, after):
             timestamp = active[0].get("time")
             rid = active[0].get("rowid")
             msg_id = active[0].get("last_dm_message_id")
+            grace_minutes = active[0].get("grace_minutes")
         else:
-            name, timestamp, rid, msg_id = active[0][0], active[0][1], active[0][2], active[0][3]
+            name, timestamp, rid, msg_id, grace_minutes = active[0][0], active[0][1], active[0][2], active[0][3], active[0][4]
             
         try:
             date_format = "%Y-%m-%d %H:%M" if len(timestamp) > 5 else "%H:%M"
@@ -1949,6 +1959,9 @@ async def on_voice_state_update(member, before, after):
                 event_dt = event_dt.replace(year=now.year, month=now.month, day=now.day)
             
             diff = int((now - event_dt).total_seconds())
+            grace_minutes = grace_minutes or 0
+            if 0 <= diff <= (grace_minutes * 60):
+                diff = 0
 
             if diff < -7200 or diff > 21600:
                 return
