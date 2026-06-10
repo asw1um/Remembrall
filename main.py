@@ -401,6 +401,8 @@ class CheckInView(discord.ui.View):
             grace_minutes = grace_minutes or 0
             if 0<=diff<= (grace_minutes * 60):
                 diff = 0
+            elif diff> (grace_minutes *60):
+                diff = diff - grace_minutes*60
             await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, eid))
      
             m, s = abs(diff) // 60, abs(diff) % 60
@@ -531,6 +533,8 @@ class AdvancedMemberPicker(discord.ui.View):
                 dm_text = f"📅 **Advanced Event Scheduled:** '{self.name}'\n⏰ Time: **{self.dt_str}**"
                 if self.notes:
                     dm_text += f"\n📝 **Notes:** {self.notes}"
+                if self.grace_minutes:
+                    dm_text += f"\n⏳ **Grace Period:** {self.grace_minutes} minutes"
                 
                 dm_text += "\n\nUse the button below to check in when the event starts!"
                 
@@ -547,6 +551,7 @@ class AdvancedMemberPicker(discord.ui.View):
             f"**Name:** {self.name}\n"
             f"**Time:** {self.dt_str}\n"
             f"**Method:** {mode_txt} | **Reminder:** {self.reminder_offset}m\n"
+            f"**Grace:** {self.grace_minutes}m\n" if self.grace_minutes else ""
             f"**Participants:** {' '.join(mentions)}",
             ephemeral=False
         )
@@ -653,7 +658,7 @@ class QuickMemberPicker(discord.ui.View):
             await query_db(
                 "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, reminder_offset, last_reminder_time, grace_minutes) "
                 "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL, ?)",
-                (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, self.reminder_offset)
+                (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, self.reminder_offset, self.grace_minutes)
             )
 
             last_row = await query_db("SELECT last_insert_rowid()", one=True)
@@ -662,8 +667,9 @@ class QuickMemberPicker(discord.ui.View):
                 view = CheckInView(event_id=event_id)
                 await send_tracked_dm(member, event_id, content = (
                     f"⚡ **Quick Event:** '{self.name}'\n"
-                    f"⏰ Time: **{self.dt_str}**\n\n"
-                    "Click the button below to check in!"),
+                    f"⏰ Time: **{self.dt_str}**"
+                    + (f"\n⏳ **Grace Period:** {self.grace_minutes} minutes" if self.grace_minutes else "")
+                    +"\n\nClick the button below to check in!"),
                     view=view
                 )
             except discord.Forbidden:
@@ -676,7 +682,8 @@ class QuickMemberPicker(discord.ui.View):
         
         await interaction.followup.send(
             f"✅ Quick event '**{self.name}**' set for **{self.dt_str}** ({dur} from now)!\n"
-            f"**Participants:** {' '.join(mentions)}",
+            + (f"**Grace:** {self.grace_minutes}m" if self.grace_minutes else "")
+            +f"**Participants:** {' '.join(mentions)}",
             ephemeral=False
         )
 
@@ -929,9 +936,12 @@ async def add_schedule(interaction: Interaction,  name: str,  day: int, start_ti
         f"🗓️ Recurring event **{name}** set for every **{days_list[day]}**",
         f"⏰ **Time:** {final_start} - {final_end}",
         f"🔔 **Reminder:** {reminder_offset}m late"
+        
     ]
     if notes:
         msg.append(f"📝 **Note:** {notes}")
+    if grace_minutes:
+        msg.append(f"⏳ **Grace:** {grace_minutes}m")
         
     await interaction.response.send_message("\n".join(msg))
 
@@ -1497,7 +1507,8 @@ class ScheduleMemberPicker(discord.ui.View):
             f"✅ **Schedule Added!**\n"
             f"📅 **Event:** {self.name} every {days_list[self.day]}\n"
             f"⏰ **Time:** {self.start_t} - {self.end_t}\n"
-            f"👥 **Assigned to:** {', '.join(mentions)}",
+            +(f"⏳ **Grace:** {self.grace_minutes}m\n" if self.grace_minutes else "")
+            +f"👥 **Assigned to:** {', '.join(mentions)}",
             ephemeral=False
         )
 
@@ -1730,7 +1741,7 @@ async def auto_check():
         future_today_str = future_date.strftime("%Y-%m-%d")
         day_idx = future_date.weekday()
 
-        all_on_day = await query_db("SELECT guild_id, user_id, username, name, end_time_24h, time_24, grace_minutes FROM schedules WHERE day_of_week = ?", (day_idx,))
+        all_on_day = await query_db("SELECT guild_id, user_id, username, name, end_time_24h, time_24h, grace_minutes FROM schedules WHERE day_of_week = ?", (day_idx,))
 
         for gid, uid, uname, name, end_t, start_t, grace in all_on_day:
             try:
@@ -1962,6 +1973,8 @@ async def on_voice_state_update(member, before, after):
             grace_minutes = grace_minutes or 0
             if 0 <= diff <= (grace_minutes * 60):
                 diff = 0
+            elif diff> (grace_minutes *60):
+                diff = diff - grace_minutes*60
 
             if diff < -7200 or diff > 21600:
                 return
