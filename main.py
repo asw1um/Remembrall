@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from lateness_model import LatenessPipeline, setup_tables
 from discord import ButtonStyle, ui
 import numpy as np
+import re
 
 # get token and file
 load_dotenv()
@@ -79,6 +80,27 @@ async def query_db(query: str, args: tuple = (), one: bool = False):
             return await query_db(query, args, one)
         raise e
 
+#SQL prevention helpers
+
+def validate_rowid(raw: str) -> int:
+    if not raw.strip().isdigit():
+        raise ValueError
+    val = int(raw.strip())
+    if val <= 0:
+        raise ValueError
+    return val
+
+def escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+def sanitize_text(value: str | None, max_len: int = 100) -> str | None:
+    if value is None:
+        return None
+    value = re.sub(r"<[^>]+>", "", value)
+    value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", value)
+    return value.strip()[:max_len]
+
+#cmd helpers
 async def time_suggester(interaction: discord.Interaction, current: str):
     suggestions = []
     # Clean the input for processing
@@ -600,7 +622,7 @@ async def create_advanced(interaction: Interaction,  name: str,  time: str, mont
     dt_str = target_dt.strftime("%Y-%m-%d %H:%M")
     
     view = AdvancedMemberPicker(
-        name=name, dt_str=dt_str, notes=notes, 
+        name=sanitize_text(name), dt_str=dt_str, notes=sanitize_text(notes), 
         checkin_opt=checkin_opt, reminder_offset=reminder_offset, 
         gid=str(interaction.guild.id), grace_minutes = grace_minutes
     )
@@ -705,7 +727,7 @@ async def create_quick(interaction: Interaction,   name: str,   minutes: int, ch
     dt_str = future_time.strftime("%Y-%m-%d %H:%M")
     gid = str(interaction.guild.id)
 
-    view = QuickMemberPicker(name=name, dt_str=dt_str,  minutes=minutes, checkin_opt=checkin_opt, reminder_offset=reminder_offset, gid=gid, grace_minutes = grace_minutes)
+    view = QuickMemberPicker(name=sanitize_text(name), dt_str=dt_str,  minutes=minutes, checkin_opt=checkin_opt, reminder_offset=reminder_offset, gid=gid, grace_minutes = grace_minutes)
 
     await interaction.response.send_message(f"⚡ Setting up **{name}** for **{dt_str}**.\n"
                                             f"Who should be added? (Select below or click confirm for just you)"
@@ -721,7 +743,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
     guild_id = str(interaction.guild.id)
     now_str = datetime.now().strftime("%Y-%m-%d")
     
-    query = "SELECT user_id, username, name, time, lateness, notes, rowid, dm_sent FROM events WHERE guild_id = ?"
+    query = "SELECT user_id, username, name, time, lateness, notes, rowid, dm_sent FROM events WHERE guild_id = ? AND time LIKE ? ESCAPE '\\'"
     params = [guild_id]
     
     if member:
@@ -733,7 +755,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
         
     if date_search:
         query += " AND time LIKE ?"
-        params.append(f"{date_search.strip()}%")
+        params.append(f"{escape_like(date_search.strip())}%")
     elif timeframe == "today":
         query += " AND time LIKE ?"
         params.append(f"{now_str}%")
@@ -810,7 +832,7 @@ async def delete_event(interaction: discord.Interaction, event_name: str):
         return await interaction.response.send_message("❌ Invalid selection.", ephemeral=True)
     
     uid = str(interaction.user.id)
-    row = await query_db("SELECT name, time, last_dm_message_id FROM events WHERE rowid = ? AND user_id = ?", (int(event_name), uid), one=True) 
+    row = await query_db("SELECT name, time, last_dm_message_id FROM events WHERE rowid = ? AND user_id = ?", (validate_rowid(event_name), uid), one=True) 
     if not row:
         return await interaction.response.send_message("❌ Record not found.", ephemeral=True)
     if isinstance(row, dict):
@@ -840,7 +862,7 @@ async def delete_event(interaction: discord.Interaction, event_name: str):
             except Exception as e:
                 print(f"Could not clean up DM for deleted event: {e}")
                     
-        await query_db("DELETE FROM events WHERE rowid = ?", (int(event_name),))
+        await query_db("DELETE FROM events WHERE rowid = ?", (validate_rowid(event_name),))
         await interaction.edit_original_response(content=f" Deleted {event_label}.", view=None)
     else:
         await interaction.edit_original_response(content="❌ Deletion cancelled.", view=None)
@@ -890,12 +912,12 @@ async def clear_self(interaction: Interaction,  timeframe: str = "all",date_sear
     if not view.value:
         return await interaction.edit_original_response(content="❌ Clear cancelled.", view=None)
 
-    query = "DELETE FROM events WHERE user_id = ? AND guild_id = ?"
+    query = "DELETE FROM events WHERE user_id = ? AND guild_id = ? AND time LIKE ? ESCAPE '\\'"
     params = [user_id, guild_id]
     
     if date_search:
         query += " AND time LIKE ?"
-        params.append(f"{date_search.strip()}%")
+        params.append(f"{escape_like(date_search.strip())}%")
     elif timeframe == "today":
         query += " AND time LIKE ?"
         params.append(f"{now_str}%")
@@ -928,7 +950,7 @@ async def add_schedule(interaction: Interaction,  name: str,  day: int, start_ti
 
     await query_db(
         "INSERT INTO schedules (guild_id, user_id, username, name, day_of_week, time_24h, end_time_24h, checkin_options, notes, reminder_offset, grace_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)",
-        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, name, day, final_start, final_end, checkin_opt, notes, reminder_offset, grace_minutes)
+        (str(interaction.guild.id), str(interaction.user.id), interaction.user.name, sanitize_text(name), day, final_start, final_end, checkin_opt, sanitize_text(notes), reminder_offset, grace_minutes)
     )
     
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -1256,7 +1278,7 @@ async def admin_delete(interaction: discord.Interaction, event_name: str):
     default_member = None
     
     if event_name.isdigit():
-        res = await query_db("SELECT name, user_id FROM events WHERE rowid = ?", (int(event_name),), one=True)
+        res = await query_db("SELECT name, user_id FROM events WHERE rowid = ?", (validate_rowid(event_name),), one=True)
         if res:
             actual_name = res[0]
             uid = int(res[1])
@@ -1326,7 +1348,7 @@ async def admin_stop(interaction: discord.Interaction, event_name: str, scope: s
     actual_name = event_name
     
     if event_name.isdigit():
-        res = await query_db("SELECT name FROM events WHERE rowid = ?", (int(event_name),), one=True)
+        res = await query_db("SELECT name FROM events WHERE rowid = ?", (validate_rowid(event_name),), one=True)
         if res: 
             actual_name = res[0]
 
@@ -1449,7 +1471,7 @@ async def admin_add_record(interaction: discord.Interaction,  event_name: str,  
     lateness_seconds = lateness_minutes * 60
     gid = str(interaction.guild.id)
 
-    view = RecordMemberPicker(event_name, dt_str, lateness_seconds, gid, notes, admin_user = interaction.user)
+    view = RecordMemberPicker(sanitize_text(event_name), dt_str, lateness_seconds, gid, sanitize_text(notes), admin_user = interaction.user)
     
     await interaction.response.send_message(
         f"📝 **Creating record for '{event_name}'** on **{dt_str}**\n"
@@ -1542,7 +1564,7 @@ async def admin_add_schedule(interaction: Interaction, name: str,  day: int,  st
     gid = str(interaction.guild.id)
 
 
-    view = ScheduleMemberPicker(name=name,  day=day, start_t=final_start,  end_t=final_end, checkin_opt=checkin_opt, notes=notes,  reminder_offset=reminder_offset, gid=gid, grace_minutes=grace_minutes )
+    view = ScheduleMemberPicker(name=sanitize_text(name),  day=day, start_t=final_start,  end_t=final_end, checkin_opt=checkin_opt, notes=sanitize_text(notes),  reminder_offset=reminder_offset, gid=gid, grace_minutes=grace_minutes )
 
     await interaction.response.send_message(
         f"🗓️ **Setting up recurring schedule: {name}**\n"
