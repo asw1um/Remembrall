@@ -543,7 +543,7 @@ class AdvancedMemberPicker(discord.ui.View):
         for member in self.targets:
             await query_db(
                 "INSERT INTO events (guild_id, user_id, username, name, time, lateness, dm_sent, checkin_options, notes, reminder_offset, last_reminder_time, grace_minutes) "
-                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, NULL,?)", 
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, NULL,?)", 
                 (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, clean_notes, self.reminder_offset, self.grace_minutes)
             )
             
@@ -679,7 +679,7 @@ class QuickMemberPicker(discord.ui.View):
         for member in self.targets:
             await query_db(
                 "INSERT INTO events (guild_id, user_id, username, name, time, lateness, dm_sent, checkin_options, reminder_offset, last_reminder_time, grace_minutes) "
-                "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL, ?)",
+                "VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, NULL, ?)",
                 (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, self.reminder_offset, self.grace_minutes)
             )
 
@@ -743,7 +743,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
     guild_id = str(interaction.guild.id)
     now_str = datetime.now().strftime("%Y-%m-%d")
     
-    query = "SELECT user_id, username, name, time, lateness, notes, rowid, dm_sent FROM events WHERE guild_id = ? AND time LIKE ? ESCAPE '\\'"
+    query = "SELECT user_id, username, name, time, lateness, notes, rowid, dm_sent FROM events WHERE guild_id = ?"
     params = [guild_id]
     
     if member:
@@ -912,7 +912,7 @@ async def clear_self(interaction: Interaction,  timeframe: str = "all",date_sear
     if not view.value:
         return await interaction.edit_original_response(content="❌ Clear cancelled.", view=None)
 
-    query = "DELETE FROM events WHERE user_id = ? AND guild_id = ? AND time LIKE ? ESCAPE '\\'"
+    query = "DELETE FROM events WHERE user_id = ? AND guild_id = ? "
     params = [user_id, guild_id]
     
     if date_search:
