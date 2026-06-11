@@ -36,7 +36,7 @@ async def get_db():
 async def init_db():
     """Initializes tables using the async connection logic."""
     db = await get_db()
-    await db.execute("""CREATE TABLE IF NOT EXISTS events (guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, time TEXT, lateness INTEGER, started INTEGER)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS events (guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, time TEXT, lateness INTEGER)""")
     await db.execute("""CREATE TABLE IF NOT EXISTS schedules(guild_id TEXT, user_id TEXT, username TEXT,  name TEXT, day_of_week INTEGER, time_24h TEXT)""")
     await db.execute("""CREATE TABLE IF NOT EXISTS guild_config(guild_id TEXT PRIMARY KEY, log_channel_id TEXT)""")
     
@@ -216,7 +216,7 @@ async def execute_stop_logic(interaction, event_id_str, members_list, role):
                     target_dt = target_dt.replace(year=now.year, month=now.month, day=now.day)
                 diff = int((now - target_dt).total_seconds())
                 last_diff = diff
-                await query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid))
+                await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, rid))
 
                 # DM cleanup
                 id_row = await query_db("SELECT last_dm_message_id FROM events WHERE rowid = ?", (rid,), one=True)
@@ -426,7 +426,7 @@ class CheckInView(discord.ui.View):
                             pass
 
             is_quick = end_time_str in ["TXT", "NONE", "None"] or end_time_str is None
-            prefix = "⚡ **Quick Event Check-in**" if is_quick else "🗓️ **Scheduled Event Check-in**"
+            prefix = "**Event Check-in**" if is_quick else "🗓️ **Scheduled Event Check-in**"
             
             formatted_date = event_dt.strftime("%A, %B %d, %Y")
             formatted_time = event_dt.strftime("%H:%M")
@@ -520,7 +520,7 @@ class AdvancedMemberPicker(discord.ui.View):
 
         for member in self.targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, notes, reminder_offset, last_reminder_time, grace_minutes) "
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, dm_sent, checkin_options, notes, reminder_offset, last_reminder_time, grace_minutes) "
                 "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, NULL,?)", 
                 (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, clean_notes, self.reminder_offset, self.grace_minutes)
             )
@@ -656,7 +656,7 @@ class QuickMemberPicker(discord.ui.View):
         mentions = []
         for member in self.targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent, checkin_options, reminder_offset, last_reminder_time, grace_minutes) "
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, dm_sent, checkin_options, reminder_offset, last_reminder_time, grace_minutes) "
                 "VALUES (?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, NULL, ?)",
                 (self.gid, str(member.id), member.name, self.name, self.dt_str, self.checkin_opt, self.reminder_offset, self.grace_minutes)
             )
@@ -721,7 +721,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
     guild_id = str(interaction.guild.id)
     now_str = datetime.now().strftime("%Y-%m-%d")
     
-    query = "SELECT user_id, username, name, time, lateness, started, notes, rowid FROM events WHERE guild_id = ?"
+    query = "SELECT user_id, username, name, time, lateness, notes, rowid, dm_sent FROM events WHERE guild_id = ?"
     params = [guild_id]
     
     if member:
@@ -763,8 +763,9 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
         
     curr_user = None
     msg_lines = [msg]
+
     
-    for uid, uname, name, timestamp, late, started, notes, _ in rows:
+    for uid, uname, name, timestamp, late, notes, _, dm_sent in rows:
         if scope == "server" and not member and uid != curr_user:
             curr_user = uid
             msg_lines.append(f"\n👤 **{uname or f'<@{uid}>'}**")
@@ -775,7 +776,7 @@ async def list_events( interaction: Interaction,  scope: str = "mine",          
             emoji = "✅ Early:" if late < 0 else ("⏱️ On Time:" if late == 0 else "⚠️ Late:")
             status = f"{timestamp} {emoji} {time_str}"
         else:
-            status = f"{timestamp} ⏳ Ongoing" if started else f"🕒 {timestamp}"
+            status = f"{timestamp} ⏳ Ongoing" if (late is None and dm_sent and dm_sent >= 1) else f"🕒 {timestamp}"
             
         msg_lines.append(f" └ **{name}** — {status}")
         
@@ -1151,7 +1152,7 @@ class AdminActionPicker(discord.ui.View):
                             try:
                                 event_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
                                 diff = int((now - event_dt).total_seconds())
-                                await query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, int(self.event_name)))
+                                await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, int(self.event_name)))
                             except ValueError:
                                 diff, event_dt = 0, now
 
@@ -1191,7 +1192,7 @@ class AdminActionPicker(discord.ui.View):
                             try:
                                 event_dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
                                 diff = int((now - event_dt).total_seconds())
-                                await query_db("UPDATE events SET lateness = ?, started = 1 WHERE rowid = ?", (diff, rid))
+                                await query_db("UPDATE events SET lateness = ? WHERE rowid = ?", (diff, rid))
                             except ValueError:
                                 diff, event_dt = 0, now
 
@@ -1387,7 +1388,7 @@ class RecordMemberPicker(discord.ui.View):
 
         for member in self.targets:
             await query_db(
-                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, notes) VALUES (?, ?, ?, ?, ?, ?, 0,?)",
+                "INSERT INTO events (guild_id, user_id, username, name, time, lateness, notes) VALUES (?, ?, ?, ?, ?, ?,?)",
                 (self.gid, str(member.id), member.name, self.event_name, self.dt_str, self.lateness_seconds, self.notes)
             )
             mentions.append(member.mention)
@@ -1754,7 +1755,7 @@ async def auto_check():
             if 0 < diff_minutes <= LEAD_MINUTES:
                 exists = await query_db("SELECT 1 FROM events WHERE user_id = ? AND name = ? AND time = ?",(uid, name, start_dt.strftime("%Y-%m-%d %H:%M")), one=True)
                 if not exists:
-                    await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, started, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0, 0)",(gid, uid, uname, name, start_dt.strftime("%Y-%m-%d %H:%M"), grace))
+                    await query_db("INSERT INTO events (guild_id, user_id, username, name, time, lateness, dm_sent) " "VALUES (?, ?, ?, ?, ?, NULL, 0)",(gid, uid, uname, name, start_dt.strftime("%Y-%m-%d %H:%M"), grace))
 
     upcoming_events = await query_db("SELECT rowid, user_id, name, time, dm_sent FROM events WHERE lateness IS NULL AND time >= ?",(now_str,) )
 
@@ -1830,7 +1831,7 @@ async def auto_check():
         except Exception as e:
             print(f"Error sending start DM for event {eid}: {e}")
 
-        await query_db("UPDATE events SET dm_sent = 1, started = 1 WHERE rowid = ?", (eid,))
+        await query_db("UPDATE events SET dm_sent = 1 WHERE rowid = ?", (eid,))
 
     #reminder dm
     if now.second < 30:
